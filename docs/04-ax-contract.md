@@ -93,6 +93,11 @@ The application can map events to AG-UI as follows:
 
 The mapping belongs in a gateway. The SPA and its domain service continue to speak the AX contract.
 
+This workspace includes one optional mapping at the standalone bridge boundary:
+`GET /v1/ag-ui/watch` projects bridge receipt lifecycles as AG-UI-compatible
+SSE events. It is intentionally a projection, not an Agent runtime or a
+CatsCo chat injection; see [10-ag-ui-adapter.md](10-ag-ui-adapter.md).
+
 ## One external CLI
 
 The project can expose one CLI binary, for example `artifactctl`, with a generic command surface:

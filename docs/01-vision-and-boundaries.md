@@ -52,7 +52,7 @@ Separating these planes prevents a Builder Agent from changing the application u
 
 ## AG-UI's position
 
-AG-UI is an optional interoperability adapter. Its lifecycle, state, tool, and interrupt events can carry the application’s projections and command outcomes, but the Artifact does not make AG-UI event names its domain model. See the [AG-UI architecture](https://github.com/ag-ui-protocol/ag-ui/blob/main/docs/concepts/architecture.mdx) and [events](https://github.com/ag-ui-protocol/ag-ui/blob/main/docs/concepts/events.mdx) documentation.
+AG-UI is an optional interoperability adapter. Its lifecycle, state, tool, and interrupt events can carry the application’s projections and command outcomes, but the Artifact does not make AG-UI event names its domain model. The standalone bridge currently provides a narrow lifecycle/custom-event projection; it does not turn the Artifact into an Agent runtime. See the [AG-UI architecture](https://docs.ag-ui.com/concepts/architecture) and [events](https://docs.ag-ui.com/concepts/events) documentation.
 
 ## First-principles assessment
 

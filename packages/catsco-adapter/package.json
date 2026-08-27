@@ -1,0 +1,32 @@
+{
+  "name": "@artifact-ax/catsco-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CatsCo-compatible Artifact node server (cloud-artifacts index/management JSON, agent-scoped management, artifact.ax.json sidecars, AX HTTP gateway) plus a browser-safe HTTP gateway client.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/node-server.d.ts",
+      "import": "./dist/node-server.js"
+    },
+    "./demo": {
+      "types": "./dist/demo/main.d.ts",
+      "import": "./dist/demo/main.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@artifact-ax/contract": "workspace:*",
+    "@artifact-ax/domain": "workspace:*",
+    "@artifact-ax/lesson-report": "workspace:*"
+  }
+}

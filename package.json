@@ -1,0 +1,28 @@
+{
+  "name": "artifact-ax-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Independent AX-friendly Artifact workspace: shared contract, in-memory domain, CatsCo-compatible artifact node, artifactctl CLI, and a teaching-report demo SPA.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.12.0",
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.0",
+    "eslint": "^9.17.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0",
+    "vitest": "^2.1.8"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter './packages/*' run build && pnpm -r --filter './apps/*' run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "vitest run",
+    "lint": "pnpm -r run lint",
+    "demo:serve": "tsx packages/catsco-adapter/src/demo/main.ts",
+    "demo:spa": "pnpm --filter @artifact-ax/demo-spa dev"
+  }
+}

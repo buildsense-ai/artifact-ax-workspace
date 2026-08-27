@@ -20,6 +20,13 @@ Agent CLI ── delegated/device authorization or service grant ──> CatsCo 
 
 This flow requires CatsCo to expose a stable issuer, authorization endpoints, token endpoints, audience rules, and claims. The current local repository documents JWT login and Feishu channel OAuth, but it does not yet document a general OIDC provider; see [CatsCo context](06-cats-company-context.md).
 
+The workspace now includes an optional transitional adapter for the contract
+that CatsCo does document today: server-side `POST /api/account/introspect`
+with a Service Token, followed by a short-lived opaque Artifact session. See
+[the adapter guide](11-transitional-auth-adapter.md). This adapter keeps the
+future OIDC exchange behind the same identity/session seam and does not modify
+cats-company.
+
 ## Recommended scopes
 
 Scopes should be narrow and composable:
@@ -57,6 +64,19 @@ If an Agent writes arbitrary JavaScript or HTML, the build service must isolate 
 ## Token handling
 
 The browser must not receive CatsCo Service Tokens, artifact-node management tokens, DNS credentials, or other host secrets. The browser receives only a user-scoped session or short-lived access token for the Artifact service.
+
+In the transitional adapter, the CatsCo user JWT is accepted only at the
+server-side exchange boundary and is not stored in the session record. The
+browser receives an HttpOnly `artifact_ax_session` cookie and can query a
+public principal view; the CatsCo Service Token remains server-only. Bridge
+reads made with that session are actor-bound and require `artifact:read` by
+default; bridge submission and receipt lifecycle writes require
+`artifact:execute` by default. Pairing-token requests remain an explicit
+loopback operator path. By default the adapter uses CatsCo's documented
+`GET /api/account/users/{uid}` service route to recheck account `state` on a
+bounded interval; a host can replace it with a stronger principal-revalidation
+hook. That lookup detects disabled/deleted accounts but is not a JWT revocation
+oracle, so session expiry still bounds token-lifecycle risk.
 
 The CLI uses its own delegated credential and never reuses a browser token from local storage. Tokens should have a resource-specific audience, a short lifetime, revocation support, and an audit trail.
 

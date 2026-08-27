@@ -101,7 +101,7 @@ Artifact event / task
 CatsCo Topic or WebSocket notification
 ```
 
-The adapter should not call CatsCo’s database, expose service tokens, or make the Artifact depend on CatsCo message persistence. A later integration can add a standard AG-UI transport without changing the Artifact domain contract.
+The adapter should not call CatsCo’s database, expose service tokens, or make the Artifact depend on CatsCo message persistence. The standalone bridge now exposes an optional AG-UI-compatible receipt projection and an opt-in transitional session adapter; both consume only replaceable boundaries and do not change the Artifact domain contract.
 
 ## Integration phases
 
@@ -109,9 +109,16 @@ The adapter should not call CatsCo’s database, expose service tokens, or make 
 
 Run the SPA, Artifact service, and `artifactctl` with a local mock identity and mock Agent. Validate the manifest, command, revision, approval, Draft, and publish flows without touching CatsCo.
 
-### Phase B: transitional CatsCo adapter
+### Phase B: transitional CatsCo adapter (implemented in the standalone workspace)
 
-Add a backend adapter that accepts a CatsCo user JWT, calls `/api/account/introspect` with a server-side Service Token, and maps the returned `uid`, `account_type`, and `state` to local workspace policy. Keep this adapter behind a feature flag and do not put the Service Token in the browser.
+The standalone workspace provides a backend adapter that accepts a CatsCo user JWT, calls `/api/account/introspect` with a server-side Service Token, and maps the returned `uid`, `account_type`, and `state` to local workspace policy. It remains opt-in, issues a short-lived opaque session, and never puts the Service Token in the browser. Deployment hardening and a durable session store remain follow-up work.
+
+The adapter also rechecks `GET /api/account/users/{uid}` at a bounded interval
+using the Service Token's `account.users.read` scope. This uses the observed
+current `state` field only to close the disabled/deleted-account window; the
+CatsCo documentation explicitly says that a profile lookup is not an
+authentication or JWT-revocation conclusion. Session expiry still bounds that
+remaining token-lifecycle risk.
 
 ### Phase C: native OIDC/OAuth
 

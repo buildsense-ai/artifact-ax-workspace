@@ -1,0 +1,25 @@
+{
+  "name": "@artifact-ax/artifact-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "External Agent Bridge server (loopback HTTP): receives ContextBundles, tracks explicit receipt states, and optionally projects them as AG-UI-compatible SSE events. Not a CatsCo chat send.",
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "start": "node dist/serve.js",
+    "test": "cd ../.. && vitest run apps/artifact-bridge/test"
+  },
+  "dependencies": {
+    "@artifact-ax/auth": "workspace:*",
+    "@artifact-ax/trigger": "workspace:*"
+  }
+}

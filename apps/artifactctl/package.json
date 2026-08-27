@@ -1,0 +1,26 @@
+{
+  "name": "artifactctl",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "External AX capability gateway CLI: describe, inspect, apply, watch, publish with JSON output. Thin HTTP client; no duplicated domain logic.",
+  "bin": {
+    "artifactctl": "./dist/cli.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "cd ../.. && vitest run apps/artifactctl/test"
+  },
+  "dependencies": {
+    "@artifact-ax/catsco-adapter": "workspace:*",
+    "@artifact-ax/contract": "workspace:*",
+    "@artifact-ax/trigger": "workspace:*"
+  },
+  "devDependencies": {
+    "@artifact-ax/domain": "workspace:*",
+    "@artifact-ax/lesson-report": "workspace:*"
+  }
+}

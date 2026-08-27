@@ -1,0 +1,24 @@
+{
+  "name": "@artifact-ax/demo-spa",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AX-friendly teaching report SPA: stable region identifiers, manifest-driven command surface, approval panel, event log. Uses the HTTP gateway when reachable and an in-process mock transport otherwise.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@artifact-ax/auth": "workspace:*",
+    "@artifact-ax/catsco-adapter": "workspace:*",
+    "@artifact-ax/contract": "workspace:*",
+    "@artifact-ax/domain": "workspace:*",
+    "@artifact-ax/lesson-report": "workspace:*",
+    "@artifact-ax/trigger": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}

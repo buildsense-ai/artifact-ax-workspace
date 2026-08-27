@@ -1,0 +1,19 @@
+{
+  "name": "@artifact-ax/trigger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Transport-neutral intelligent trigger and bridge contracts: ContextBundle, IntentArbiter, receipts, and an optional AG-UI event projection. Selections are context, not a command.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src"
+  }
+}

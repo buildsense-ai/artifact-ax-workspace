@@ -2,6 +2,19 @@
 
 This document describes the smallest identity contract CatsCo would need to support the independent Artifact application. It is a proposal, not a claim about endpoints that exist today.
 
+## What is implemented now
+
+CatsCo does not yet document the issuer/discovery surface proposed below. The
+independent workspace therefore ships a deliberately smaller transitional
+adapter: it calls the observed account-center `POST /api/account/introspect`
+endpoint with a server-only Service Token, maps the active account to an
+Artifact principal, and issues a short-lived opaque session. The adapter is
+optional and lives in `apps/artifact-bridge`; it does not change cats-company.
+It also polls the observed account lookup for a current disabled/deleted state,
+but that profile check is not a JWT-revocation oracle. Native OAuth/OIDC can
+replace only this provider boundary later. Details and local commands are in
+the [adapter guide](11-transitional-auth-adapter.md).
+
 ## Why a standard contract matters
 
 The Artifact app should reuse CatsCo identity without depending on CatsCo’s database, JWT signing secret, or WebApp implementation. OIDC gives the SPA and CLI a standard way to authenticate; the Artifact service still owns workspace authorization.
