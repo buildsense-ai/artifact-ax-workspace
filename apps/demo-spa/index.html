@@ -114,6 +114,15 @@
         <ul id="outbox-list" class="outbox-list"></ul>
       </section>
 
+      <section data-region-id="agent-notes" data-region-title="Agent notes" aria-label="Agent notes" class="region region-agent-notes">
+        <div class="region-head">
+          <h2>Agent notes</h2>
+          <span class="muted">durable application writeback</span>
+        </div>
+        <p class="muted">Only a completed task with an <code>applied</code> receipt appears here. Notes are stored by this app, not in the chat.</p>
+        <ul id="agent-notes-list" class="outbox-list"></ul>
+      </section>
+
       <footer class="muted">
         <span id="transport-note"></span>
       </footer>

@@ -11,3 +11,4 @@ export * from './draft.js';
 export * from './projection.js';
 export * from './gateway.js';
 export * from './catsco.js';
+export * from './cloud-artifact.js';

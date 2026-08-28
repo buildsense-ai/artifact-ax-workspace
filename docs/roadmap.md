@@ -1,6 +1,6 @@
 # Roadmap
 
-Status of the compatibility-first vertical slices (2026-08-26), what is mock
+Status of the compatibility-first vertical slices (2026-08-28), what is mock
 vs CatsCo-compatible, and what is not yet implemented.
 
 ## Delivered in the first slice
@@ -164,6 +164,46 @@ Not claimed here:
 See [10-ag-ui-adapter.md](10-ag-ui-adapter.md) for the event mapping and a
 CLI/SSE example.
 
+## Cloud HTML Artifact host integration (fourth slice)
+
+The demo now implements the page-side contracts from the local
+`cloud-html-artifact` Skill (v1.4.0). This is an application adapter, not a
+copy of the Skill's publisher, injected bridge, or Agent runtime.
+
+| Surface | Status |
+| --- | --- |
+| `@artifact-ax/contract`: v1/v2/v3 manifests, bounded result schemas, trust-separated Observation Packets, task statuses, result receipts | implemented + tested against the Skill's local smoke contracts |
+| `apps/demo-spa/public/artifact-manifest.json`: one v3 task intent linked to one real result sink | implemented + publisher manifest validator passes |
+| `window.catscoArtifact.getContext()`: synchronous, bounded semantic snapshot with stable focus anchors | implemented + app helper tests |
+| `window.catscoArtifact.applyResult()`: sink/payload/revision validation, result-id idempotency, localStorage persistence, durable `applied` boundary | implemented + app helper and browser checks |
+| `CloudHostOutbox`: explicit Host task request, activation-aware staging, task status mapping, no hidden fallback/retry | implemented + unit tested |
+| Host/Agent result readback into the SPA | contract-ready: Agent uses the declared task/result scripts; live CatsCo Host round-trip is not yet run |
+
+### Compatibility rules carried over
+
+- The immutable manifest is version-level metadata. It contains no current
+  rows, selections, prompts, credentials, or permission claims.
+- Page-authored context is observation data. Trusted Artifact identity and
+  lifecycle fields remain outside `getContext()`.
+- A task is requested only from the explicit Focus Set action. Collected,
+  suggested, confirmation-gated, deferred, disconnected, and activation-
+  rejected states remain visible local receipts; they do not create a hidden
+  Agent call or silently fall back to the local bridge.
+- A deferred or activation-rejected low-risk send can be resumed with the same
+  bundle ID from a fresh explicit click; a timeout remains uncertain and is not
+  retried automatically.
+- An official contract-marked `completed` status is treated as success because
+  CatsCo emits it only after the exact page returns an application receipt with
+  `status: applied`; marker-less structural Hosts must report that application
+  status explicitly. The notes sink persists before returning that status, and
+  `result_id` remains the idempotency key.
+- The publisher still owns CatsCo branding and injects the official bridge.
+  This repository does not add custom `postMessage`, browser credentials, or
+  a per-Artifact server process.
+
+See [12-cloud-artifact-host.md](12-cloud-artifact-host.md) for the boundary,
+manifest IDs, local commands, and explicit non-goals.
+
 ## Round-trip against a real cats-company server
 
 Not yet run. The next phase should point `CATSCO_ARTIFACT_INDEX_URL` and
@@ -180,7 +220,10 @@ above). This is the highest-value follow-up.
   server-side JWT introspection, opaque session cookie, explicit scopes, and
   actor-scoped bridge access. Remaining work is deployment hardening and a
   real durable session store.
-- Phase 4: draft branching + merge MVP, rollback/migration commands.
-- Phase 5: native OAuth/OIDC per docs/09; connect a real Agent runner or MCP
+- Phase 4: run a real Cloud Artifact Host task round-trip against a published
+  immutable version; verify task reader, result writer, and `applied` receipt
+  end to end.
+- Phase 5: draft branching + merge MVP, rollback/migration commands.
+- Phase 6: native OAuth/OIDC per docs/09; connect a real Agent runner or MCP
   adapter behind the existing AG-UI projection without changing the Artifact
   or bridge contracts.

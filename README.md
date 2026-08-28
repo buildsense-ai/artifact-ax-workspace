@@ -29,7 +29,7 @@ Run the whole stack locally (Node ≥ 20, pnpm):
 ```bash
 pnpm install
 pnpm build          # packages + CLI + demo SPA
-pnpm test           # 202 tests: contract, domain, trigger (incl. bridge + durable store + AG-UI), auth, adapter, CLI e2e, bridge e2e
+pnpm test           # full contract, domain, trigger, auth, adapter, CLI, bridge, and SPA helper suite
 pnpm -r run typecheck && pnpm -r run lint
 pnpm demo:serve     # artifact node: AX API + CatsCo index/management + SPA
 ```
@@ -129,6 +129,60 @@ generic Artifact runtime.
   chat text and includes the full bundle only when `include_context=1` is
   explicitly requested.
 
+## Cloud HTML Artifact integration (fourth slice)
+
+The demo SPA now speaks the page-side contracts from the local
+`cloud-html-artifact` skill package (v1.4.0) without copying its publisher or
+injected bridge. The integration keeps the application independent: the
+official CatsCo publisher supplies the bridge and Host connection when a page
+is opened in CatsCo, while a directly opened page remains a normal standalone
+SPA.
+
+- `packages/contract` validates the versioned application map
+  (`catsco.artifact-manifest.v1/v2/v3`), bounded result schemas, trust-separated
+  Observation Packets, task statuses, and application receipts. These are
+  transport-neutral types; they do not call a Host or an Agent.
+- `apps/demo-spa/public/artifact-manifest.json` declares one real v3 task,
+  `lesson-report.review-selection.v1`, and one result sink,
+  `lesson-report.agent-notes.upsert.v1`. The task input is a bounded projection
+  of the existing ContextBundle. The sink accepts only a summary plus known
+  row IDs and recommendations.
+- The page exposes `window.catscoArtifact.getContext()` as a synchronous,
+  read-only semantic snapshot. It contains stable selections, the current
+  report revision, visible rows, filters, and prior Agent notes; it never
+  contains credentials, prompts, opaque refs, or authority claims. The bridge
+  treats this object as untrusted observation data.
+- The page exposes `window.catscoArtifact.applyResult()`. It validates the
+  declared sink and payload again, checks the expected report revision,
+  deduplicates by `result_id`, persists notes in the app's localStorage store,
+  and returns `applied` only after persistence succeeds. The local key is
+  scoped by workspace, Artifact, and actor; reloading the page retains the
+  note and its application receipt identity without sharing it across scopes.
+- When an injected `window.catscoArtifactHost` is present, the SPA uses
+  `CloudHostOutbox`. Only an explicit low-risk `send` with `delivery=sent`
+  creates a Host task. Collected, suggested, confirmation-gated, deferred, or
+  activation-rejected bundles remain staged locally; the adapter never falls
+  back to the local Bridge and never retries a timed-out task automatically.
+  Host `submitted`, `running`, `completed`, and `failed` statuses appear as
+  task receipts. An official contract-marked `completed` status is considered
+  successful because CatsCo emits it only after the exact page returns an
+  application-level `applied` receipt; structural test Hosts must provide that
+  application status explicitly. A staged deferred send keeps
+  its bundle ID and offers an explicit “Send now” retry; timeouts never retry
+  automatically.
+- If no Host is injected, the existing `?bridge=` local bridge remains
+  available; without either option the SPA uses the local mock outbox. A Host
+  takes precedence over `?bridge=` because it is the trusted cloud path. The
+  Host task creates a normal visible CatsCo turn; it is not a silent chat
+  injection or a hidden model call.
+
+The page contract deliberately uses a small `agent notes` writeback example
+instead of pretending that the existing approval-gated row mutation is an
+application-level `applied` result. Approving rows still follows the AX
+command and human approval flow. A production application can replace the
+localStorage sink with its own durable store while keeping the same manifest
+and receipt boundary.
+
 ## Optional CatsCo session boundary
 
 The bridge can also expose a server-side transitional identity adapter. It
@@ -214,15 +268,14 @@ CatsCo compatibility surface served by the node:
 packages/
   contract/        # AX types + runtime validation + CatsCo wire contracts
   domain/          # in-memory ArtifactService (describe/inspect/apply/watch/publish)
-  trigger/         # intelligent trigger MVP: ContextBundle + IntentArbiter + mock outbox
-                   #   + external Agent Bridge protocol/client + AG-UI projection
+  trigger/         # intelligent trigger MVP + local Bridge + AG-UI + Cloud Host adapter
   auth/            # CatsCo introspection seam, opaque sessions, browser client
   lesson-report/   # example structured artifact spec + capability handlers
   catsco-adapter/  # Artifact node server + browser-safe HTTP gateway client
 apps/
   artifactctl/     # JSON CLI over the AX gateway (thick gateway, thin client)
   artifact-bridge/ # external Agent Bridge server (loopback HTTP inbox; in-memory or durable JSON-file store)
-  demo-spa/        # teaching-report SPA (Vite, vanilla TS)
+  demo-spa/        # teaching-report SPA + Cloud Artifact page/task/writeback surface
 docs/              # design docs (unchanged) + roadmap.md
 ```
 
@@ -250,9 +303,10 @@ docs/              # design docs (unchanged) + roadmap.md
 
 See [docs/roadmap.md](docs/roadmap.md) for the mock vs CatsCo-compatible
 breakdown and what is deliberately not implemented (native OAuth/OIDC,
-code building, rollback, CRDT/canvas, full Agent/MCP runtime, draft merge). Bridge
-receipts can now persist via the opt-in `JsonFileBridgeStore`; the domain /
-trigger in-memory stores remain in-memory.
+code building, rollback, CRDT/canvas, full Agent/MCP runtime, draft merge,
+and a real CatsCo Host round-trip). Bridge receipts can now persist via the
+opt-in `JsonFileBridgeStore`; the domain/trigger stores and demo note sink are
+local by default.
 
 ## Documents
 
@@ -267,6 +321,7 @@ trigger in-memory stores remain in-memory.
 - [Proposed CatsCo OAuth contract](docs/09-cats-company-oauth-contract.md)
 - [AG-UI adapter boundary](docs/10-ag-ui-adapter.md)
 - [Transitional auth adapter](docs/11-transitional-auth-adapter.md)
+- [Cloud HTML Artifact Host adapter](docs/12-cloud-artifact-host.md)
 - [ADR 0001: standalone AX-friendly app](docs/adr/0001-standalone-ax-friendly-app.md)
 - [Roadmap](docs/roadmap.md)
 - [References](docs/references.md)

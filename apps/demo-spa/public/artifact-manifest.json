@@ -1,0 +1,172 @@
+{
+  "contract_version": "catsco.artifact-manifest.v3",
+  "purpose": "Review teaching-report rows with a human or the owning Agent.",
+  "views": ["review-table", "summary-panel", "approval-panel", "agent-notes"],
+  "entities": ["lesson-review-row", "agent-review-note"],
+  "entrypoints": ["index.html"],
+  "observation_capabilities": ["runtime_snapshot", "semantic_context"],
+  "result_sinks": [
+    {
+      "id": "lesson-report.agent-notes.upsert.v1",
+      "description": "Create a bounded Agent review note for the selected report rows.",
+      "input_schema": {
+        "type": "object",
+        "required": ["summary"],
+        "additionalProperties": false,
+        "properties": {
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "row_ids": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          "recommendations": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          }
+        }
+      }
+    }
+  ],
+  "task_intents": [
+    {
+      "id": "lesson-report.review-selection.v1",
+      "title": "Review selected report context",
+      "description": "Review the selected report rows and return a bounded note for this application.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bundle_id",
+          "session_id",
+          "actor_id",
+          "artifact_id",
+          "revision",
+          "selections",
+          "intent",
+          "assessment"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "bundle_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "session_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "artifact_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selections": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "required": ["selection_id", "artifact_id", "revision", "region_id", "label"],
+              "additionalProperties": false,
+              "properties": {
+                "selection_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "artifact_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "region_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "node_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "note": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              }
+            }
+          },
+          "intent": {
+            "type": "object",
+            "required": ["text"],
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string",
+                "maxLength": 500
+              }
+            }
+          },
+          "assessment": {
+            "type": "object",
+            "required": ["intent_kind", "confidence", "risk", "complete"],
+            "additionalProperties": false,
+            "properties": {
+              "intent_kind": {
+                "type": "string",
+                "enum": ["collect", "inspect", "explain", "review", "compare", "change", "destructive", "ambiguous"]
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "risk": {
+                "type": "string",
+                "enum": ["none", "low", "medium", "high"]
+              },
+              "complete": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "result_sink": "lesson-report.agent-notes.upsert.v1"
+    }
+  ]
+}

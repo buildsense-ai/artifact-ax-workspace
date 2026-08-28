@@ -353,6 +353,25 @@ button:focus-visible {
   background: var(--bg);
 }
 
+.agent-note-item {
+  border: 1px solid #d9e8de;
+  border-radius: 10px;
+  padding: 12px;
+  background: #f7fbf8;
+}
+
+.agent-note-summary {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-note-recommendations {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 0.82rem;
+}
+
 .outbox-head {
   display: flex;
   align-items: center;
@@ -374,6 +393,10 @@ button:focus-visible {
 .outbox-meta {
   margin: 6px 0 0;
   font-size: 0.78rem;
+}
+
+.outbox-item > .btn {
+  margin-top: 10px;
 }
 
 .badge-decision {

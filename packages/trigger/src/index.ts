@@ -9,3 +9,4 @@ export * from './bridge.js';
 export * from './bridge-client.js';
 export * from './bridge-outbox.js';
 export * from './ag-ui.js';
+export * from './cloud-host.js';

@@ -23,6 +23,29 @@ import {
   newSelectionId,
   type BridgeClient,
 } from '@artifact-ax/trigger';
+import {
+  type ArtifactHostPort,
+  CloudHostOutbox,
+  type CloudHostDeliveryReceipt,
+  detectArtifactHost,
+} from '@artifact-ax/trigger';
+import {
+  AGENT_NOTES_STORAGE_KEY,
+  CLOUD_RESULT_SINK_ID,
+  CLOUD_TASK_INTENT_ID,
+  AGENT_NOTE_RESULT_SCHEMA,
+  agentNotesStorageKey,
+  type AgentNoteRecord,
+  buildSemanticContext,
+  isCloudResultId,
+  loadAgentNotes,
+  noteFingerprint,
+  saveAgentNotes,
+  validateAgentNotePayload,
+} from './cloud-surface.js';
+import {
+  validateResultPayload,
+} from '@artifact-ax/contract';
 import { resolveConfig, createGateway, createBridgeClient, createAuthClient, hydrateSessionActor, ACTOR_OPTIONS } from './transport.js';
 
 /** Regions a mutation intent may not target (derived / read-only views). */
@@ -45,11 +68,102 @@ interface DemoState {
   lastResult?: CommandResult;
 }
 
+interface ArtifactResultRequest {
+  sink_id: string;
+  result_id: string;
+  expected_state_revision?: string;
+  payload: unknown;
+}
+
+interface ArtifactResultResponse {
+  status: 'applied' | 'rejected' | 'failed';
+  code?: string;
+  message?: string;
+  receipt?: Record<string, unknown>;
+}
+
+interface ArtifactPageAPI {
+  getContext?: () => unknown;
+  applyResult?: (request: ArtifactResultRequest) => Promise<ArtifactResultResponse> | ArtifactResultResponse;
+  isDirty?: () => boolean;
+}
+
+interface WindowWithArtifactSurface extends Window {
+  catscoArtifact?: ArtifactPageAPI;
+  catscoArtifactHost?: ArtifactHostPort;
+}
+
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
   if (!el) throw new Error(`missing element #${id}`);
   return el as T;
 };
+
+function injectedArtifactHost(): ArtifactHostPort | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const candidate = (window as WindowWithArtifactSurface).catscoArtifactHost;
+    return detectArtifactHost(candidate) ? candidate : null;
+  } catch {
+    // A malformed or hostile global must not prevent the standalone page from
+    // loading. The official bridge is optional and feature-detected only.
+    return null;
+  }
+}
+
+function hostConnected(host: ArtifactHostPort | null): boolean | undefined {
+  if (!host?.isConnected) return undefined;
+  try {
+    return host.isConnected() === true;
+  } catch {
+    return false;
+  }
+}
+
+function isResultRequest(value: unknown): value is ArtifactResultRequest {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    const object = value as Record<string, unknown>;
+    const allowed = new Set(['sink_id', 'result_id', 'expected_state_revision', 'payload']);
+    if (Object.keys(object).some((key) => !allowed.has(key) || ['__proto__', 'prototype', 'constructor'].includes(key))) return false;
+    if (typeof object.sink_id !== 'string' || typeof object.result_id !== 'string' || !Object.hasOwn(object, 'payload')) return false;
+    if (object.expected_state_revision !== undefined &&
+        (typeof object.expected_state_revision !== 'string' || object.expected_state_revision.trim() !== object.expected_state_revision || object.expected_state_revision.length > 128)) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resultFailure(code: string, message: string): ArtifactResultResponse {
+  const failed = code === 'application_unavailable' || code === 'storage_failed';
+  return { status: failed ? 'failed' : 'rejected', code, message: message.replace(/[\0\r\n]/g, ' ').slice(0, 500) };
+}
+
+function appliedReceipt(note: AgentNoteRecord, noteCount = 1): ArtifactResultResponse {
+  return {
+    status: 'applied',
+    receipt: {
+      result_id: note.result_id,
+      state_revision: note.state_revision,
+      note_count: noteCount,
+      row_ids: [...note.row_ids],
+    },
+  };
+}
+
+function cloneArtifactResultResponse(response: ArtifactResultResponse): ArtifactResultResponse {
+  return {
+    ...response,
+    ...(response.receipt !== undefined
+      ? { receipt: JSON.parse(JSON.stringify(response.receipt)) as Record<string, unknown> }
+      : {}),
+  };
+}
 
 function statusBadge(status: string): string {
   const cls = status === 'approved' ? 'badge-approved' : status === 'rejected' ? 'badge-rejected' : 'badge-pending';
@@ -84,7 +198,7 @@ function decisionBadge(decision: string): string {
 
 function receiptBadge(state: string): string {
   if (state === 'completed' || state === 'acknowledged' || state === 'accepted') return 'badge-approved';
-  if (state === 'rejected' || state === 'expired') return 'badge-rejected';
+  if (state === 'rejected' || state === 'expired' || state === 'failed' || state === 'unavailable') return 'badge-rejected';
   return 'badge-pending';
 }
 
@@ -94,6 +208,14 @@ export class DemoApp {
   private trigger: TriggerService | null = null;
   private bridgeClient: BridgeClient | null = null;
   private bridgeWatcher: ReturnType<typeof setTimeout> | null = null;
+  private cloudHost: ArtifactHostPort | null = null;
+  private cloudOutbox: CloudHostOutbox | null = null;
+  private cloudReceiptUnsubscribe: (() => void) | null = null;
+  private agentNotes: AgentNoteRecord[] = [];
+  private notesStorageKey = AGENT_NOTES_STORAGE_KEY;
+  private readonly resultReceipts = new Map<string, ArtifactResultResponse>();
+  private readonly resultFingerprints = new Map<string, string>();
+  private readonly pendingResults = new Map<string, Promise<ArtifactResultResponse>>();
   /** True while a stream turn is being processed; deliveries then queue. */
   private turnActive = false;
 
@@ -103,6 +225,10 @@ export class DemoApp {
   ) {}
 
   async start(): Promise<void> {
+    // Install the synchronous page surface before any awaited auth/network
+    // work. The official reader may ask for context as soon as the document is
+    // embedded; the closures read the latest state once refresh completes.
+    this.installArtifactSurface();
     const config = resolveConfig();
     const authClient = createAuthClient(config);
     // A host performs the CatsCo exchange before loading the SPA. Reading
@@ -141,11 +267,20 @@ export class DemoApp {
     });
 
     // Intelligent trigger: focus set is context, the arbiter decides what happens.
-    // The outbox is the honest transport seam: a MockOutbox by default, or a
-    // BridgeOutbox when an external Agent Bridge is configured (?bridge=<url>).
+    // A connected Cloud Artifact Host is the production path. The local bridge
+    // remains an explicit development adapter, and MockOutbox keeps a directly
+    // opened/static page useful when neither external surface is available.
     const bridgeClient = createBridgeClient(config);
-    const outbox: Outbox = bridgeClient ? new BridgeOutbox({ client: bridgeClient }) : new MockOutbox();
+    const cloudHost = injectedArtifactHost();
+    const cloudOutbox = cloudHost
+      ? new CloudHostOutbox({ host: cloudHost, taskIntentId: CLOUD_TASK_INTENT_ID })
+      : null;
+    const outbox: Outbox = cloudOutbox ?? (bridgeClient ? new BridgeOutbox({ client: bridgeClient }) : new MockOutbox());
     this.bridgeClient = bridgeClient;
+    this.cloudHost = cloudHost;
+    this.cloudOutbox = cloudOutbox;
+    this.notesStorageKey = agentNotesStorageKey(config.workspaceId, config.artifactId, config.actor.id);
+    this.agentNotes = loadAgentNotes(this.browserStorage(), this.notesStorageKey);
     this.trigger = new TriggerService({
       outbox,
       actorId: config.actor.id,
@@ -153,6 +288,17 @@ export class DemoApp {
       regionWritable: (regionId: string) => !READ_ONLY_REGIONS.has(regionId),
     });
     $('outbox-label').textContent = `outbox: ${this.trigger.outboxLabel()}`;
+    if (cloudOutbox) {
+      // Receipt updates are emitted for submitted/running/completed as well as
+      // terminal failures. Rendering them locally never sends a second task.
+      this.cloudReceiptUnsubscribe = cloudOutbox.onReceipt(() => this.renderOutbox());
+      const commit = $<HTMLButtonElement>('focus-commit');
+      commit.textContent = 'Ask Agent with this context';
+      const connected = hostConnected(cloudHost) ?? true;
+      $('transport-note').textContent = connected
+        ? 'transport: Cloud Artifact Host (task loop; visible Agent turn)'
+        : 'transport: Cloud Artifact Host unavailable until the trusted host connects';
+    }
     document.querySelectorAll<HTMLElement>('[data-region-focus]').forEach((btn) => {
       btn.addEventListener('click', () => this.focusRegion(btn.dataset.regionFocus ?? ''));
     });
@@ -161,9 +307,16 @@ export class DemoApp {
     $('focus-commit').addEventListener('click', () => void this.commitFocus());
     $('focus-list').addEventListener('click', (e) => this.onFocusListAction(e as MouseEvent));
     $('focus-list').addEventListener('input', (e) => this.onFocusNote(e as InputEvent));
+    $('outbox-list').addEventListener('click', (e) => {
+      const button = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-cloud-resume]');
+      if (button) void this.resumeCloudBundle(button.dataset.cloudResume ?? '');
+    });
 
-    $('transport-note').textContent = `transport: ${this.transportLabel}`;
-    document.title = `Lesson report · ${this.transportLabel}`;
+    const effectiveTransportLabel = cloudOutbox
+      ? `Cloud Artifact Host${hostConnected(cloudHost) === false ? ' (not connected)' : ''}`
+      : this.transportLabel;
+    $('transport-note').textContent = `transport: ${effectiveTransportLabel}`;
+    document.title = `Lesson report · ${effectiveTransportLabel}`;
 
     await this.refresh();
     this.updateFocusChrome();
@@ -199,6 +352,11 @@ export class DemoApp {
     const [id, type] = value.split(':') as [string, ActorInput['type']];
     const actor = ACTOR_OPTIONS.find((a) => a.id === id) ?? { id, type };
     if (this.state) this.state.actor = { ...actor, type };
+    const config = resolveConfig();
+    this.notesStorageKey = agentNotesStorageKey(config.workspaceId, config.artifactId, id);
+    this.agentNotes = loadAgentNotes(this.browserStorage(), this.notesStorageKey);
+    this.resultReceipts.clear();
+    this.resultFingerprints.clear();
     void this.refresh();
   }
 
@@ -332,6 +490,7 @@ export class DemoApp {
     this.renderSummary();
     this.renderApprovals();
     this.renderEvents();
+    this.renderAgentNotes();
     this.updateFocusChrome();
   }
 
@@ -395,6 +554,167 @@ export class DemoApp {
       .map((event: Event) => `${event.seq} ${event.type} by ${event.actor.id} → ${JSON.stringify(event.data)}`)
       .join('\n');
     $('event-log').textContent = lines === '' ? '(no events yet; commands will appear here)' : lines;
+  }
+
+  // -------------------------------------------------- Cloud Artifact page contract
+
+  /**
+   * Install the optional page-authored API consumed by the official Cloud HTML
+   * Artifact bridge.  It is feature-detected and additive: a directly opened
+   * page has no Host, but can still use every normal SPA control.
+   */
+  private installArtifactSurface(): void {
+    if (typeof window === 'undefined') return;
+    const target = window as WindowWithArtifactSurface;
+    try {
+      const prior = target.catscoArtifact ?? {};
+      target.catscoArtifact = {
+        ...prior,
+        getContext: () => this.semanticContext(),
+        applyResult: (request) => this.applyArtifactResult(request),
+        isDirty: () => false,
+      };
+    } catch {
+      // A publisher may expose a non-configurable page surface. Keep the
+      // application usable even when an embedding policy prevents extension.
+    }
+  }
+
+  /** Synchronous, bounded, read-only semantic context for OBSERVE/TASK reads. */
+  private semanticContext(): Record<string, unknown> {
+    if (!this.state) {
+      return { view: 'lesson-report', state_revision: '0', dirty: false };
+    }
+    const { rows, table } = this.tableState();
+    return buildSemanticContext({
+      revision: this.state.projection.revision,
+      table,
+      visibleRows: rows,
+      selections: this.state.focusSelections,
+      notes: this.agentNotes,
+    });
+  }
+
+  /**
+   * Result sink implementation. The official injected bridge validates the
+   * outer envelope; this method validates the sink and business payload again,
+   * checks optimistic revision continuity, persists through localStorage, and
+   * only then returns `applied`.
+   */
+  private applyArtifactResult(request: ArtifactResultRequest): Promise<ArtifactResultResponse> {
+    let resultId = '';
+    try {
+      resultId = typeof request?.result_id === 'string' ? request.result_id : '';
+    } catch {
+      return Promise.resolve(resultFailure('invalid_request', 'result request is invalid'));
+    }
+    if (resultId === '') return this.applyArtifactResultOnce(request).then(cloneArtifactResultResponse);
+    const pending = this.pendingResults.get(resultId);
+    if (pending) return pending.then(cloneArtifactResultResponse);
+    const promise = this.applyArtifactResultOnce(request);
+    this.pendingResults.set(resultId, promise);
+    void promise.then(
+      () => {
+        if (this.pendingResults.get(resultId) === promise) this.pendingResults.delete(resultId);
+      },
+      () => {
+        if (this.pendingResults.get(resultId) === promise) this.pendingResults.delete(resultId);
+      },
+    );
+    return promise.then(cloneArtifactResultResponse);
+  }
+
+  private async applyArtifactResultOnce(request: ArtifactResultRequest): Promise<ArtifactResultResponse> {
+    if (!this.state) return resultFailure('application_unavailable', 'application state is not ready');
+    if (!isResultRequest(request)) return resultFailure('invalid_request', 'result request is invalid');
+    if (request.sink_id !== CLOUD_RESULT_SINK_ID) return resultFailure('unknown_sink', 'result sink is not declared by this application');
+    if (!isCloudResultId(request.result_id)) return resultFailure('invalid_result_id', 'result id is invalid');
+
+    const existing = this.agentNotes.find((note) => note.result_id === request.result_id);
+    const knownRows = new Set(
+      ((this.state.projection.regions.find((region) => region.region.id === 'review-table')?.data as ReviewTableState | undefined)?.rows ?? [])
+        .map((row) => row.id),
+    );
+    try {
+      // Keep the runtime contract in lock-step with artifact-manifest.json.
+      validateResultPayload(AGENT_NOTE_RESULT_SCHEMA, request.payload);
+    } catch (error) {
+      return resultFailure('invalid_payload', error instanceof Error ? error.message : 'result payload does not match the declared sink schema');
+    }
+    const checked = validateAgentNotePayload(request.payload, knownRows);
+    if (!checked.ok) return resultFailure(checked.code, checked.message);
+    const payload = checked.value;
+    const fingerprint = noteFingerprint(payload);
+
+    const cachedReceipt = this.resultReceipts.get(request.result_id);
+    if (cachedReceipt) {
+      return this.resultFingerprints.get(request.result_id) === fingerprint
+        ? cloneArtifactResultResponse(cachedReceipt)
+        : resultFailure('idempotency_conflict', 'result id was already applied with a different payload');
+    }
+
+    if (existing) {
+      const priorFingerprint = noteFingerprint({
+        summary: existing.summary,
+        row_ids: existing.row_ids,
+        recommendations: existing.recommendations,
+      });
+      if (priorFingerprint !== fingerprint) return resultFailure('idempotency_conflict', 'result id was already applied with a different payload');
+      const prior = appliedReceipt(existing, this.agentNotes.length);
+      this.resultReceipts.set(request.result_id, prior);
+      this.resultFingerprints.set(request.result_id, fingerprint);
+      return cloneArtifactResultResponse(prior);
+    }
+
+    const currentRevision = String(this.state.projection.revision);
+    if (request.expected_state_revision !== undefined && request.expected_state_revision !== currentRevision) {
+      return resultFailure('state_conflict', `expected state revision ${request.expected_state_revision} does not match ${currentRevision}`);
+    }
+
+    const note: AgentNoteRecord = {
+      result_id: request.result_id,
+      summary: payload.summary,
+      row_ids: payload.row_ids ?? [],
+      recommendations: payload.recommendations ?? [],
+      state_revision: currentRevision,
+      applied_at: new Date().toISOString(),
+    };
+    const nextNotes = [...this.agentNotes, note].slice(-20);
+    if (!saveAgentNotes(this.browserStorage(), nextNotes, this.notesStorageKey)) {
+      return resultFailure('storage_failed', 'the application could not persist the Agent note');
+    }
+    this.agentNotes = nextNotes;
+    const receipt = appliedReceipt(note, nextNotes.length);
+    this.resultReceipts.set(request.result_id, receipt);
+    this.resultFingerprints.set(request.result_id, fingerprint);
+    this.renderAgentNotes();
+    return receipt;
+  }
+
+  private browserStorage(): Storage | undefined {
+    if (typeof window === 'undefined') return undefined;
+    try {
+      return window.localStorage;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private renderAgentNotes(): void {
+    const list = document.getElementById('agent-notes-list');
+    if (!list) return;
+    if (this.agentNotes.length === 0) {
+      list.innerHTML = '<li class="muted">No Agent notes yet. A completed Cloud task will appear here.</li>';
+      return;
+    }
+    list.innerHTML = [...this.agentNotes]
+      .reverse()
+      .map((note) => `<li class="agent-note-item">
+        <p class="agent-note-summary">${escapeHtml(note.summary)}</p>
+        <p class="outbox-meta muted">${note.row_ids.length > 0 ? `Rows: ${escapeHtml(note.row_ids.join(', '))} · ` : ''}${escapeHtml(note.applied_at)}</p>
+        ${note.recommendations.length > 0 ? `<ul class="agent-note-recommendations">${note.recommendations.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
+      </li>`)
+      .join('');
   }
 
   // -------------------------------------------------- focus set + trigger
@@ -556,9 +876,24 @@ export class DemoApp {
       const result = await this.trigger.execute(sels, intent, { defer: deferred });
       const failed = result.receipts.filter((receipt) => !receipt.ok).length;
       const note = $<HTMLElement>('focus-run-note');
+      const cloudStaged = this.cloudOutbox
+        ? result.receipts.filter((receipt) => {
+            const cloud = receipt as Partial<CloudHostDeliveryReceipt>;
+            return cloud.task_status === 'unavailable' && cloud.kind === 'queued';
+          }).length
+        : 0;
       if (deferred) {
         note.hidden = false;
-        note.textContent = 'Run active: bundles queued for the next turn, not injected mid-turn.';
+        note.textContent = this.cloudOutbox
+          ? 'Run active: the Cloud task stayed local and was not injected mid-turn; resend it explicitly after this turn.'
+          : 'Run active: bundles queued for the next turn, not injected mid-turn.';
+      } else if (this.cloudOutbox) {
+        note.hidden = false;
+        note.textContent = cloudStaged > 0
+          ? `Cloud Host created ${result.receipts.length - cloudStaged} task${result.receipts.length - cloudStaged === 1 ? '' : 's'}; ${cloudStaged} additional context${cloudStaged === 1 ? '' : 's'} stayed queued for a separate explicit click.`
+          : failed === 0
+          ? `Cloud Host accepted ${result.receipts.length} context ${result.receipts.length === 1 ? 'task' : 'tasks'}; the Agent turn and application receipt appear below.`
+          : `Cloud Host did not create ${failed} ${failed === 1 ? 'task' : 'tasks'}; inspect the staged receipt below.`;
       } else if (this.bridgeClient) {
         note.hidden = false;
         note.textContent = failed === 0
@@ -590,6 +925,39 @@ export class DemoApp {
   private renderOutbox(): void {
     if (!this.trigger) return;
     const list = $<HTMLElement>('outbox-list');
+    if (this.cloudOutbox) {
+      const receipts = this.cloudOutbox.listReceipts();
+      if (receipts.length === 0) {
+        list.innerHTML = '<li class="muted">No Cloud tasks yet. Compose a focus set and explicitly ask the Agent.</li>';
+        return;
+      }
+      list.innerHTML = receipts
+        .map((receipt: CloudHostDeliveryReceipt) => {
+          const state = !receipt.ok
+            ? receipt.kind === 'rejected' ? 'rejected' : 'failed'
+            : receipt.task_status === 'unavailable'
+            ? receipt.kind
+            : receipt.application_status === 'rejected' || receipt.application_status === 'failed'
+              ? receipt.application_status
+              : receipt.task_status;
+          const canResume = receipt.ok
+            && receipt.kind === 'queued'
+            && receipt.task_status === 'unavailable'
+            && this.cloudOutbox?.isResumable(receipt.bundle_id) === true;
+          return `<li class="outbox-item" data-bundle-id="${escapeHtml(receipt.bundle_id)}">
+          <div class="outbox-head">
+            <span class="badge ${receiptBadge(state)}">${escapeHtml(state)}</span>
+            <span class="outbox-title">${escapeHtml(receipt.bundle_id)}</span>
+            ${receipt.task_id ? `<span class="muted">task ${escapeHtml(receipt.task_id)}</span>` : ''}
+          </div>
+          <p class="outbox-meta muted">${escapeHtml(receipt.message)}</p>
+          ${receipt.application_status ? `<p class="outbox-meta muted">application receipt: ${escapeHtml(receipt.application_status)}</p>` : ''}
+          ${canResume ? `<button class="btn btn-small" data-cloud-resume="${escapeHtml(receipt.bundle_id)}">Send now</button>` : ''}
+        </li>`;
+        })
+        .join('');
+      return;
+    }
     if (this.bridgeClient) {
       const receipts = this.trigger.outboxReceipts();
       if (receipts.length === 0) {
@@ -629,6 +997,24 @@ export class DemoApp {
       </li>`,
       )
       .join('');
+  }
+
+  private async resumeCloudBundle(bundleId: string): Promise<void> {
+    if (!this.cloudOutbox || bundleId === '' || !this.cloudOutbox.isResumable(bundleId)) return;
+    const note = $<HTMLElement>('focus-run-note');
+    note.hidden = false;
+    note.textContent = 'Sending the staged context through the Cloud Artifact Host…';
+    try {
+      const receipt = await this.cloudOutbox.resume(bundleId);
+      note.textContent = receipt.ok && receipt.task_id
+        ? 'Cloud Host accepted the staged context; follow its task and application receipt below.'
+        : receipt.ok
+          ? 'The staged context remains queued; use Send now after the Host is connected and the click is active.'
+          : `Cloud Host could not send the staged context: ${receipt.message}`;
+    } catch (error) {
+      note.textContent = `Cloud Host resume failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    this.renderOutbox();
   }
 
   private startBridgeWatch(client: BridgeClient, outbox: BridgeOutbox): void {

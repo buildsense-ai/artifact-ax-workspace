@@ -18,6 +18,18 @@ AG-UI supplies an Agent-to-UI event vocabulary and transport-facing concepts. Th
 
 Agent-HTML informs stable Artifact/Block/Region identity and structured interaction. PMX Canvas informs typed surfaces, bounded Agent context, capability ceilings, and server-side trust boundaries. The project does not import either project’s full host or canvas model.
 
+## Cloud Artifact platform contract
+
+- Local Skill package: `/Users/pi-dal/Downloads/cloud-html-artifact` (v1.4.0,
+  read-only during this slice)
+- Contract references: `references/context-contract.md`,
+  `references/agent-task-loop.md`, `references/result-writeback.md`, and
+  `references/publication-contract.md` under that package
+
+The local path is an operator reference, not a repository dependency. The
+standalone workspace ports only the bounded contracts it needs and leaves the
+official publisher, injected bridge, and branding assets under CatsCo control.
+
 ## Local CatsCo sources
 
 - [`cats-company/README.md`](../../cats-company/README.md)

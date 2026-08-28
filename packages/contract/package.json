@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Shared AX contract: manifest, commands, events, revisions, approvals, and CatsCo cloud-artifacts index/management types with runtime validation.",
+  "description": "Shared AX and Cloud Artifact contracts: manifests, bounded observation/result/task envelopes, commands, events, revisions, approvals, and CatsCo cloud-artifacts wire types with runtime validation.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
