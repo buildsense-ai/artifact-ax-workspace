@@ -6,7 +6,7 @@ import {
   type UiDocumentPatch,
   type UiPrimitive,
 } from '@artifact-ax/ui-document';
-import { applyUiDocumentPatch, checkUiDocument } from './ui/ui-draft.js';
+import { applyUiDocumentPatch, checkUiDocument, missingProtectedNodes } from './ui/ui-draft.js';
 
 /**
  * The formal, standalone XiaoBa UI Builder path.
@@ -271,10 +271,17 @@ export type UiProposalApplyResult =
   | { ok: true; document: UiDocument; record: UiProposalRecord; receipt: UiProposalReceiptPayload }
   | { ok: false; code: string; message: string; record: UiProposalRecord | null };
 
+export type UiProposalDiscardResult =
+  | { ok: true; code: 'discarded'; message: string; record: UiProposalRecord }
+  | { ok: false; code: 'no_proposal' | 'storage_failed'; message: string; record: UiProposalRecord | null };
+
 /**
  * Pure state machine for the formal compose-ui UI-proposal lifecycle. It owns
  * staging/apply/discard, sink-scoped idempotency, and browser-local persistence
  * and is fully dependency-injectable (so it is unit-testable without a DOM).
+ * Every state change is transactional: the proposal store is written first and
+ * in-memory/idempotency state is committed only when that write succeeds, so a
+ * persistence failure leaves the prior state and is reported, never swallowed.
  * It never applies a patch merely because it was delivered: `stage` only
  * validates and durably stores a proposal; a human `apply`/`discard` decides.
  */
@@ -337,6 +344,22 @@ export class UiProposalManager {
   apply(document: UiDocument): UiProposalApplyResult {
     const proposal = this.current();
     if (!proposal) return { ok: false, code: 'no_proposal', message: 'no staged UI proposal to apply', record: null };
+    // Snapshot the mutable proposal fields so a failed persistence step can
+    // restore the exact prior state instead of leaving a half-applied record.
+    const prior = {
+      state: proposal.state,
+      error: proposal.error,
+      applied_revision: proposal.applied_revision,
+      applied_at: proposal.applied_at,
+    };
+    const restore = (): void => {
+      proposal.state = prior.state;
+      proposal.error = prior.error;
+      if (prior.applied_revision === undefined) delete proposal.applied_revision;
+      else proposal.applied_revision = prior.applied_revision;
+      if (prior.applied_at === undefined) delete proposal.applied_at;
+      else proposal.applied_at = prior.applied_at;
+    };
     const result = applyUiDocumentPatch(document, proposal.patch);
     if (!result.ok) {
       const stale = document.revision !== proposal.base_revision;
@@ -344,7 +367,11 @@ export class UiProposalManager {
       proposal.error = stale
         ? `Stale: the document moved to revision ${document.revision}; re-request or discard this proposal.`
         : result.message;
-      this.persist();
+      if (!this.persist()) {
+        // The stale marking is not durable: leave the prior record untouched.
+        restore();
+        return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated proposal state', record: proposal };
+      }
       return { ok: false, code: result.code, message: proposal.error, record: proposal };
     }
     // Persist-before-report-success: the updated active UiDocument must be
@@ -356,18 +383,36 @@ export class UiProposalManager {
     proposal.applied_revision = result.document.revision;
     proposal.applied_at = new Date().toISOString();
     proposal.error = undefined;
-    this.persist();
+    // The document is durable, but the proposal record must still agree with it.
+    // If the metadata write fails, restore the record and report the failure
+    // instead of silently ignoring it; a retry re-applies the same patch.
+    if (!this.persist()) {
+      restore();
+      return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated proposal state', record: proposal };
+    }
     return { ok: true, document: result.document, record: proposal, receipt: buildUiProposalReceipt(proposal) };
   }
 
   /** Human Discard: remove the staged proposal (never apply merely because it was delivered). */
-  discard(): { ok: boolean; message: string } {
+  discard(): UiProposalDiscardResult {
     const proposal = this.current();
-    if (!proposal) return { ok: false, message: 'no staged UI proposal to discard' };
+    if (!proposal) return { ok: false, code: 'no_proposal', message: 'no staged UI proposal to discard', record: null };
+    const prior = {
+      state: proposal.state,
+      error: proposal.error,
+      discarded_at: proposal.discarded_at,
+    };
     proposal.state = 'discarded';
     proposal.discarded_at = new Date().toISOString();
-    this.persist();
-    return { ok: true, message: `Discarded ${proposal.summary}.` };
+    if (!this.persist()) {
+      // The discard is not durable: leave the prior record untouched.
+      proposal.state = prior.state;
+      proposal.error = prior.error;
+      if (prior.discarded_at === undefined) delete proposal.discarded_at;
+      else proposal.discarded_at = prior.discarded_at;
+      return { ok: false, code: 'storage_failed', message: 'the application could not persist the proposal store', record: proposal };
+    }
+    return { ok: true, code: 'discarded', message: `Discarded ${proposal.summary}.`, record: proposal };
   }
 
   current(): UiProposalRecord | null {
@@ -378,8 +423,8 @@ export class UiProposalManager {
     return [...this.proposals];
   }
 
-  private persist(): void {
-    saveUiProposals(this.storage, this.proposals, this.storageKey);
+  private persist(): boolean {
+    return saveUiProposals(this.storage, this.proposals, this.storageKey);
   }
 }
 
@@ -418,9 +463,11 @@ export function loadActiveDocument(storage: Storage | undefined, storageKey: str
     if (!raw || raw.length > 128 * 1024) return fallback;
     const parsed: unknown = JSON.parse(raw);
     if (!isPlainRecord(parsed)) return fallback;
-    // It must be a lesson-report document (same id/contract) and stay in-anchor.
+    // It must be a lesson-report document (same id/contract) that stays in-anchor
+    // and still carries every protected governance surface.
     if (parsed.id !== fallback.id || parsed.contract_version !== UI_DOCUMENT_CONTRACT_VERSION) return fallback;
     if (checkUiDocument(parsed as unknown as UiDocument).length > 0) return fallback;
+    if (missingProtectedNodes(parsed as unknown as UiDocument).length > 0) return fallback;
     return parsed as unknown as UiDocument;
   } catch {
     return fallback;

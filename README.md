@@ -328,7 +328,9 @@ sink returns the application's applied receipt:
 - `lesson-report.compose-ui.v1` →
   `lesson-report.ui-document-patch.propose.v1` (UI patch proposal). A UI patch
   is **staged only** until a human applies or discards it in the page; it is
-  never applied merely because it was delivered.
+  never applied merely because it was delivered. The governance surfaces
+  (`review-table`, `approval-list`, `ui-builder`) are protected: a proposal that
+  removes one is rejected with code `protected_surface` and never staged.
 
 There is no Artifact Bridge, artifactctl context, custom HTTP endpoint, local
 pairing token, or cats-company source change in this deployment path.

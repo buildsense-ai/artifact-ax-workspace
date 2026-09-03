@@ -44,8 +44,43 @@ export function anchorDriftErrors(document: UiDocument): string[] {
   return errors;
 }
 
+/**
+ * Node ids a formal patch must always retain. These are the governance
+ * surfaces of the application: the human review table, the human approval
+ * panel, and the Builder panel that gates Agent patches behind a human
+ * apply/discard decision. A proposal that would remove any of them is rejected
+ * with code `protected_surface` — never silently applied or staged.
+ */
+export const PROTECTED_NODE_IDS: readonly string[] = ['review-table', 'approval-list', 'ui-builder'];
+
+/** Protected node ids missing from a document (empty means all retained). */
+export function missingProtectedNodes(document: UiDocument): string[] {
+  const present = new Set(document.nodes.map((node) => node.id));
+  return PROTECTED_NODE_IDS.filter((id) => !present.has(id));
+}
+
+/** Errors for every protected governance surface a patch would remove. */
+export function protectedSurfaceErrors(base: UiDocument, patch: unknown): string[] {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return [];
+  const ops = (patch as { ops?: unknown }).ops;
+  if (!Array.isArray(ops)) return [];
+  const present = new Set(base.nodes.map((node) => node.id));
+  const removed = new Set<string>();
+  for (const op of ops) {
+    if (!op || typeof op !== 'object' || Array.isArray(op)) continue;
+    const candidate = op as { op?: unknown; id?: unknown };
+    if (candidate.op !== 'remove' || typeof candidate.id !== 'string') continue;
+    if (PROTECTED_NODE_IDS.includes(candidate.id) && present.has(candidate.id)) removed.add(candidate.id);
+  }
+  return [...removed].map((id) => `node "${id}" is a protected governance surface and cannot be removed`);
+}
+
 /** Apply a UI-document patch to a base document; the base is never mutated. */
 export function applyUiDocumentPatch(base: UiDocument, patch: unknown): DraftApplyResult {
+  // Governance surfaces are protected before any other validation so a patch
+  // that would hide them is always rejected, with a specific code.
+  const protectedErrors = protectedSurfaceErrors(base, patch);
+  if (protectedErrors.length > 0) return { ok: false, code: 'protected_surface', message: protectedErrors[0]! };
   const result = applyPatch(base, patch);
   if (!result.ok) return result;
   const drift = anchorDriftErrors(result.document);

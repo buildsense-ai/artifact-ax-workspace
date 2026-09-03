@@ -66,7 +66,9 @@ any patch.
    `document_id` and `base_revision` taken from the task payload, plus a
    bounded, ordered list of `insert`/`update`/`remove` ops.
 3. Propose only changes that stay within the deployed stable anchors and the
-   fixed closed catalog. Never emit raw HTML/JS/CSS, `style`, `href`, `src`,
+   fixed closed catalog, and never propose removing `review-table`,
+   `approval-list`, or `ui-builder` — the page rejects those removals with code
+   `protected_surface`. Never emit raw HTML/JS/CSS, `style`, `href`, `src`,
    `innerHTML`, `on*`, or a non-catalog prop/binding/event.
 4. Keep the patch minimal and bounded; the page rejects malformed, no-op, and
    stale patches. Do not invent a node id, a region id, a catalog kind, or an

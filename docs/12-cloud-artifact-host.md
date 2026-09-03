@@ -83,12 +83,20 @@ The `lesson-report.ui-document-patch.propose.v1` sink accepts an untrusted
 document id, base revision, operation constraints, stable anchors, and closed
 catalog, rejecting raw code/HTML/JS/CSS and malformed/no-op/stale patches, then
 durably stages the proposal in the browser-local store before returning an
-`applied` receipt. The patch is **never** applied merely because it was
-delivered: a later human `Apply` revalidates against the then-current document,
-persists the updated active `UiDocument` **before** reporting success (a
-persistence failure is reported as `failed` and leaves no in-memory mutation),
-and a human `Discard` removes the staged proposal. Result idempotency is
-sink-scoped so a result id cannot collide across the two sinks.
+`applied` receipt. Three governance surfaces — `review-table`, `approval-list`,
+and `ui-builder` — are protected: a proposal containing a `remove` op for any of
+them is rejected with code `protected_surface` and never staged, and the same
+check is applied when a persisted active document is reloaded at startup (a
+stored document missing one fails closed to the shipped document). The patch is
+**never** applied merely because it was delivered: a later human `Apply`
+revalidates against the then-current document and persists the updated active
+`UiDocument` **before** reporting success. Apply and discard are transactional:
+if either persistence step (document, or proposal metadata) fails, the
+operation fails with code `storage_failed` and a visible status message, the
+prior proposal state is restored, and no in-memory mutation is left; the
+document and proposal stores never silently diverge.
+Result idempotency is sink-scoped so a result id cannot collide across the two
+sinks.
 
 Storage scope and honesty: staged proposals **and** the persisted active
 `UiDocument` are keyed by **workspace + Artifact only, never by actor** — a

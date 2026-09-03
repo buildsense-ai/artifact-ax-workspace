@@ -106,6 +106,15 @@ rejected as `anchor_drift`. Use only these:
 - Region ids: `review-table`, `focus-set`, `summary-panel`, `approval-panel`,
   `event-log`, `context-outbox`, `agent-notes`, `ui-builder`.
 
+## Protected governance surfaces (never removable)
+
+Three surfaces are human/governance surfaces and a proposal **cannot remove
+them**: `review-table` (the human review table), `approval-list` (the human
+approval panel), and `ui-builder` (the Builder panel that gates every Agent
+patch behind a human apply/discard decision). A patch containing a `remove` op
+for any of these is rejected with code `protected_surface` before it is staged.
+Do not propose their removal, and do not try to remove-then-reinsert them.
+
 ## Constraints (the page rejects these)
 
 - Raw executable presentation: any prop or text that looks like markup
@@ -118,6 +127,8 @@ rejected as `anchor_drift`. Use only these:
   document invalid.
 - Inserting a brand-new stable anchor (the closed catalog does not allow
   inventing a node or region id).
+- Removing a protected governance surface (`review-table`, `approval-list`,
+  `ui-builder`) — rejected with code `protected_surface`.
 
 ## Minimal safe example
 

@@ -4,7 +4,7 @@ import { parseArtifactManifest } from '@artifact-ax/contract';
 import { CloudHostOutbox } from '@artifact-ax/trigger';
 import { UI_DOCUMENT_PATCH_CONTRACT_VERSION, type UiDocumentPatch } from '@artifact-ax/ui-document';
 import { LESSON_REPORT_DOCUMENT } from './ui/lesson-report.document.js';
-import { applyUiDocumentPatch } from './ui/ui-draft.js';
+import { applyUiDocumentPatch, missingProtectedNodes } from './ui/ui-draft.js';
 import {
   CLOUD_UI_RESULT_SINK_ID,
   CLOUD_UI_TASK_INTENT_ID,
@@ -41,10 +41,13 @@ function validPatch(over: Partial<UiDocumentPatch> = {}): UiDocumentPatch {
   };
 }
 
-/** A Storage shim; keys listed in `failOnceKeys` throw on their next write. */
-function mockStorage(initial: Record<string, string> = {}, failOnceKeys: readonly string[] = []): Storage {
+/**
+ * A Storage shim. Keys listed in `failOnceKeys` (or added later to a shared
+ * `Set`) throw on their next write, then succeed — one-shot write failures.
+ */
+function mockStorage(initial: Record<string, string> = {}, failOnceKeys: readonly string[] | Set<string> = []): Storage {
   const map = new Map<string, string>(Object.entries(initial));
-  const armed = new Set<string>(failOnceKeys);
+  const armed = failOnceKeys instanceof Set ? failOnceKeys : new Set<string>(failOnceKeys);
   return {
     get length() {
       return map.size;
@@ -134,6 +137,24 @@ describe('compose-ui · patch proposal validation (security boundary)', () => {
     const result = validateUiDocumentPatchProposal(raw, LESSON_REPORT_DOCUMENT);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('anchor_drift');
+  });
+
+  it('rejects a proposal that removes a protected governance surface, and never stages it', () => {
+    for (const id of ['review-table', 'approval-list', 'ui-builder'] as const) {
+      const raw = validPatch({ ops: [{ op: 'remove', id }] });
+      const result = validateUiDocumentPatchProposal(raw, LESSON_REPORT_DOCUMENT);
+      expect(result.ok, `removing ${id} must be rejected`).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe('protected_surface');
+        expect(result.message).toContain(id);
+      }
+    }
+    // A non-protected removal is still stageable.
+    const removable = validateUiDocumentPatchProposal(
+      validPatch({ ops: [{ op: 'remove', id: 'event-log' }] }),
+      LESSON_REPORT_DOCUMENT,
+    );
+    expect(removable.ok).toBe(true);
   });
 
   it('rejects a stale proposal whose base revision no longer matches the document', () => {
@@ -283,6 +304,11 @@ describe('compose-ui · staged proposal persistence and state transitions', () =
     expect(loadActiveDocument(drifted, docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
     const oversized = mockStorage({ [docKey]: 'x'.repeat(200 * 1024) });
     expect(loadActiveDocument(oversized, docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
+    // A stored document missing a protected governance surface fails closed.
+    const stripped = { ...applied.document, nodes: applied.document.nodes.filter((node) => node.id !== 'ui-builder') };
+    expect(missingProtectedNodes(stripped)).toContain('ui-builder');
+    const withoutBuilder = mockStorage({ [docKey]: JSON.stringify(stripped) });
+    expect(loadActiveDocument(withoutBuilder, docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
     expect(saveActiveDocument(undefined, applied.document, docKey)).toBe(false);
     expect(loadActiveDocument(undefined, docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
   });
@@ -414,6 +440,72 @@ describe('compose-ui · UiProposalManager stage/apply/discard + sink-scoped idem
       expect(retried.record.state).toBe('applied');
     }
     expect(loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT).revision).toBe(LESSON_REPORT_DOCUMENT.revision + 1);
+  });
+
+  it('restores the proposal and reports storage_failed when metadata persistence fails after the document is durable', () => {
+    const proposalKey = uiProposalStorageKey('ws_demo', 'lesson-report');
+    const docKey = activeDocumentStorageKey('ws_demo', 'lesson-report');
+    const armed = new Set<string>();
+    const storage = mockStorage({}, armed);
+    const mgr = new UiProposalManager({ storage, storageKey: proposalKey, documentStorageKey: docKey });
+    const stage = mgr.stage({ result_id: 'arr_'.concat('Q'.repeat(43)), payload: validPatch(), document: LESSON_REPORT_DOCUMENT });
+    expect(stage.ok).toBe(true);
+    armed.add(proposalKey);
+    const applied = mgr.apply(LESSON_REPORT_DOCUMENT);
+    expect(applied.ok).toBe(false);
+    if (!applied.ok) expect(applied.code).toBe('storage_failed');
+    // The proposal record is restored, never left half-applied.
+    expect(mgr.current()?.state).toBe('staged');
+    expect(mgr.current()?.error).toBeUndefined();
+    // The document write itself did land; the edge is explicit and the still-
+    // staged record matches it, so a retry re-applies the same patch.
+    expect(loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT).revision).toBe(LESSON_REPORT_DOCUMENT.revision + 1);
+    const retried = mgr.apply(LESSON_REPORT_DOCUMENT);
+    expect(retried.ok).toBe(true);
+    if (retried.ok) expect(retried.record.state).toBe('applied');
+  });
+
+  it('restores prior state when stale-marking cannot be persisted, then retries', () => {
+    const proposalKey = uiProposalStorageKey('ws_demo', 'lesson-report');
+    const docKey = activeDocumentStorageKey('ws_demo', 'lesson-report');
+    const armed = new Set<string>();
+    const storage = mockStorage({}, armed);
+    const mgr = new UiProposalManager({ storage, storageKey: proposalKey, documentStorageKey: docKey });
+    const stage = mgr.stage({ result_id: 'arr_'.concat('R'.repeat(43)), payload: validPatch(), document: LESSON_REPORT_DOCUMENT });
+    expect(stage.ok).toBe(true);
+    const moved = applyUiDocumentPatch(LESSON_REPORT_DOCUMENT, validPatch({ ops: [{ op: 'remove', id: 'event-log' }] }));
+    expect(moved.ok).toBe(true);
+    if (!moved.ok) return;
+    armed.add(proposalKey);
+    const failed = mgr.apply(moved.document);
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.code).toBe('storage_failed');
+    expect(mgr.current()?.state).toBe('staged');
+    expect(mgr.current()?.error).toBeUndefined();
+    const retried = mgr.apply(moved.document);
+    expect(retried.ok).toBe(false);
+    if (!retried.ok) expect(retried.code).not.toBe('storage_failed');
+    expect(mgr.current()?.state).toBe('stale');
+    expect(mgr.current()?.error).toContain('Stale');
+  });
+
+  it('leaves the prior staged state when a discard cannot be persisted, then retries', () => {
+    const proposalKey = uiProposalStorageKey('ws_demo', 'lesson-report');
+    const docKey = activeDocumentStorageKey('ws_demo', 'lesson-report');
+    const armed = new Set<string>();
+    const storage = mockStorage({}, armed);
+    const mgr = new UiProposalManager({ storage, storageKey: proposalKey, documentStorageKey: docKey });
+    const stage = mgr.stage({ result_id: 'arr_'.concat('S'.repeat(43)), payload: validPatch(), document: LESSON_REPORT_DOCUMENT });
+    expect(stage.ok).toBe(true);
+    armed.add(proposalKey);
+    const failed = mgr.discard();
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.code).toBe('storage_failed');
+    expect(mgr.current()?.state).toBe('staged');
+    const retried = mgr.discard();
+    expect(retried.ok).toBe(true);
+    if (retried.ok) expect(retried.code).toBe('discarded');
+    expect(mgr.current()).toBeNull();
   });
 });
 

@@ -670,7 +670,10 @@ export class DemoApp {
   /** Human Discard: remove the staged proposal (never apply merely because it was delivered). */
   private async discardUiProposal(): Promise<void> {
     const result = this.uiProposalManager.discard();
-    this.uiBuilderStatus = result.ok ? result.message : 'No staged UI proposal to discard.';
+    // The manager reports every outcome (no proposal, discarded, persistence
+    // failure) with an explicit message; persistence failures leave the prior
+    // staged state untouched.
+    this.uiBuilderStatus = result.message;
     this.renderApp();
   }
 
