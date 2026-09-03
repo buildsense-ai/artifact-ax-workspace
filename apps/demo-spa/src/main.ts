@@ -29,6 +29,7 @@ import {
   type CloudHostDeliveryReceipt,
   detectArtifactHost,
 } from '@artifact-ax/trigger';
+import { validateDocument, type UiDocument } from '@artifact-ax/ui-document';
 import {
   AGENT_NOTES_STORAGE_KEY,
   CLOUD_RESULT_SINK_ID,
@@ -47,14 +48,22 @@ import {
   validateResultPayload,
 } from '@artifact-ax/contract';
 import { resolveConfig, createGateway, createBridgeClient, createAuthClient, hydrateSessionActor, ACTOR_OPTIONS } from './transport.js';
+import { LESSON_REPORT_DOCUMENT } from './ui/lesson-report.document.js';
+import { renderApp, type SemanticDispatch, type ShellView } from './ui/catalog-renderer.js';
+import type { OutboxItemView, UIDocumentView } from './ui/view-model.js';
+import { applyUiDocumentPatch, readDraftPatchParam } from './ui/ui-draft.js';
 
 /** Regions a mutation intent may not target (derived / read-only views). */
 const READ_ONLY_REGIONS = new Set(['summary-panel', 'approval-panel']);
 
+/** The live document driving the screen. A builder may replace it via a validated draft patch. */
+let activeDocument: UiDocument = LESSON_REPORT_DOCUMENT;
+
 /**
- * Teaching-report demo UI: a normal SPA with stable region identifiers,
- * a manifest-driven command surface, an approval panel, and an event log.
- * All mutation goes through semantic commands on the gateway.
+ * Teaching-report demo UI: a normal SPA whose business surfaces are driven by a
+ * validated declarative UiDocument (catalog + data bindings + semantic events).
+ * All mutation goes through semantic commands on the gateway; the production
+ * cloud host/task/result sink behavior is unchanged.
  */
 
 interface DemoState {
@@ -92,12 +101,6 @@ interface WindowWithArtifactSurface extends Window {
   catscoArtifact?: ArtifactPageAPI;
   catscoArtifactHost?: ArtifactHostPort;
 }
-
-const $ = <T extends HTMLElement>(id: string): T => {
-  const el = document.getElementById(id);
-  if (!el) throw new Error(`missing element #${id}`);
-  return el as T;
-};
 
 function injectedArtifactHost(): ArtifactHostPort | null {
   if (typeof window === 'undefined') return null;
@@ -165,43 +168,6 @@ function cloneArtifactResultResponse(response: ArtifactResultResponse): Artifact
   };
 }
 
-function statusBadge(status: string): string {
-  const cls = status === 'approved' ? 'badge-approved' : status === 'rejected' ? 'badge-rejected' : 'badge-pending';
-  return `<span class="badge ${cls}">${status}</span>`;
-}
-
-function rowTableRow(row: ReviewRow, selected: boolean): string {
-  return `<tr data-row-id="${row.id}" data-node-id="${row.id}">
-    <td><input type="checkbox" class="row-select" data-row-id="${row.id}" aria-label="Select ${escapeHtml(row.student)} · ${escapeHtml(row.topic)}" ${selected ? 'checked' : ''} /></td>
-    <td>${escapeHtml(row.student)}</td>
-    <td>${escapeHtml(row.topic)}</td>
-    <td>${statusBadge(row.status)}</td>
-  </tr>`;
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-}
-
-function decisionBadge(decision: string): string {
-  switch (decision) {
-    case 'send':
-      return 'badge-approved';
-    case 'confirm':
-      return 'badge-rejected';
-    case 'suggest':
-      return 'badge-pending';
-    default:
-      return 'badge-decision';
-  }
-}
-
-function receiptBadge(state: string): string {
-  if (state === 'completed' || state === 'acknowledged' || state === 'accepted') return 'badge-approved';
-  if (state === 'rejected' || state === 'expired' || state === 'failed' || state === 'unavailable') return 'badge-rejected';
-  return 'badge-pending';
-}
-
 export class DemoApp {
   private state: DemoState | null = null;
   private watcher: ReturnType<typeof setTimeout> | null = null;
@@ -218,11 +184,19 @@ export class DemoApp {
   private readonly pendingResults = new Map<string, Promise<ArtifactResultResponse>>();
   /** True while a stream turn is being processed; deliveries then queue. */
   private turnActive = false;
+  /** Composer state kept across re-renders so keystrokes never lose focus. */
+  private intentText = '';
+  private runNote = '';
+  private focusExpanded = false;
+  private transportLabel = '';
+  private actionStatus = '';
 
   constructor(
     private readonly gateway: AxGateway,
-    private readonly transportLabel: string,
-  ) {}
+    private readonly transport: string,
+  ) {
+    this.transportLabel = transport;
+  }
 
   async start(): Promise<void> {
     // Install the synchronous page surface before any awaited auth/network
@@ -236,40 +210,9 @@ export class DemoApp {
     // authenticated actor, so ContextBundle.actor_id cannot be spoofed by a
     // picker value.
     const authenticatedSession = authClient ? await hydrateSessionActor(config) : false;
-    ACTOR_OPTIONS.forEach((actor) => {
-      const option = document.createElement('option');
-      option.value = `${actor.id}:${actor.type}`;
-      option.textContent = actor.name ?? actor.id;
-      const picker = $<HTMLSelectElement>('actor-select');
-      if (actor.id === config.actor.id) option.selected = true;
-      picker.appendChild(option);
-    });
-    if (!ACTOR_OPTIONS.some((actor) => actor.id === config.actor.id)) {
-      const option = document.createElement('option');
-      option.value = `${config.actor.id}:${config.actor.type ?? 'human'}`;
-      option.textContent = config.actor.name ?? `Authenticated actor (${config.actor.id})`;
-      option.selected = true;
-      $<HTMLSelectElement>('actor-select').appendChild(option);
-    }
-    const actorPicker = $<HTMLSelectElement>('actor-select');
-    actorPicker.disabled = authenticatedSession;
-    if (authenticatedSession) actorPicker.title = 'Actor is fixed by the authenticated Artifact session';
-    actorPicker.addEventListener('change', (e) => this.switchActor((e.target as HTMLSelectElement).value));
-    $('filter-select').addEventListener('change', () => void this.applyFilter());
-    $('approve-rows-btn').addEventListener('click', () => void this.approveSelected());
-    $('select-all').addEventListener('change', (e) => this.toggleSelectAll((e.target as HTMLInputElement).checked));
-    $('rows-body').addEventListener('change', (e) => {
-      const target = e.target as HTMLInputElement;
-      if (target.classList.contains('row-select')) {
-        const row = this.tableState().rows.find((r) => r.id === (target.dataset.rowId ?? ''));
-        if (row) this.onRowToggle(row, target.checked);
-      }
-    });
+    this.authenticated = authenticatedSession;
 
     // Intelligent trigger: focus set is context, the arbiter decides what happens.
-    // A connected Cloud Artifact Host is the production path. The local bridge
-    // remains an explicit development adapter, and MockOutbox keeps a directly
-    // opened/static page useful when neither external surface is available.
     const bridgeClient = createBridgeClient(config);
     const cloudHost = injectedArtifactHost();
     const cloudOutbox = cloudHost
@@ -287,40 +230,18 @@ export class DemoApp {
       sessionProvider: () => 'topic_lesson_report',
       regionWritable: (regionId: string) => !READ_ONLY_REGIONS.has(regionId),
     });
-    $('outbox-label').textContent = `outbox: ${this.trigger.outboxLabel()}`;
-    if (cloudOutbox) {
-      // Receipt updates are emitted for submitted/running/completed as well as
-      // terminal failures. Rendering them locally never sends a second task.
-      this.cloudReceiptUnsubscribe = cloudOutbox.onReceipt(() => this.renderOutbox());
-      const commit = $<HTMLButtonElement>('focus-commit');
-      commit.textContent = 'Ask Agent with this context';
-      const connected = hostConnected(cloudHost) ?? true;
-      $('transport-note').textContent = connected
-        ? 'transport: Cloud Artifact Host (task loop; visible Agent turn)'
-        : 'transport: Cloud Artifact Host unavailable until the trusted host connects';
-    }
-    document.querySelectorAll<HTMLElement>('[data-region-focus]').forEach((btn) => {
-      btn.addEventListener('click', () => this.focusRegion(btn.dataset.regionFocus ?? ''));
-    });
-    $('focus-toggle').addEventListener('click', () => this.toggleFocus());
-    $('focus-intent').addEventListener('input', () => this.onIntentInput());
-    $('focus-commit').addEventListener('click', () => void this.commitFocus());
-    $('focus-list').addEventListener('click', (e) => this.onFocusListAction(e as MouseEvent));
-    $('focus-list').addEventListener('input', (e) => this.onFocusNote(e as InputEvent));
-    $('outbox-list').addEventListener('click', (e) => {
-      const button = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-cloud-resume]');
-      if (button) void this.resumeCloudBundle(button.dataset.cloudResume ?? '');
-    });
 
     const effectiveTransportLabel = cloudOutbox
       ? `Cloud Artifact Host${hostConnected(cloudHost) === false ? ' (not connected)' : ''}`
       : this.transportLabel;
-    $('transport-note').textContent = `transport: ${effectiveTransportLabel}`;
-    document.title = `Lesson report · ${effectiveTransportLabel}`;
+    this.transportLabel = effectiveTransportLabel;
+    if (cloudOutbox) {
+      this.cloudReceiptUnsubscribe = cloudOutbox.onReceipt(() => this.renderApp());
+    }
 
     await this.refresh();
-    this.updateFocusChrome();
-    this.renderOutbox();
+    this.applyDraft();
+
     if (bridgeClient && outbox instanceof BridgeOutbox) this.startBridgeWatch(bridgeClient, outbox);
     this.startWatch();
   }
@@ -345,8 +266,58 @@ export class DemoApp {
       lastCursor: projection.cursor,
       lastResult: this.state?.lastResult,
     };
-    this.render();
+    this.renderApp();
   }
+
+  // -------------------------------------------------- semantic action dispatch
+
+  /** Route a validated document event action to the domain/gateway handler. */
+  private readonly dispatch: SemanticDispatch = (action, payload) => {
+    switch (action) {
+      case 'filterRows':
+        void this.applyFilter(String(payload.status ?? 'all'));
+        break;
+      case 'toggleRow':
+        this.onRowToggle(payload.row as ReviewRow, Boolean(payload.checked));
+        break;
+      case 'selectAll':
+        this.toggleSelectAll(Boolean(payload.checked));
+        break;
+      case 'approveRows':
+        void this.approveSelected();
+        break;
+      case 'focusRegion':
+        this.focusRegion(String(payload.regionId ?? ''));
+        break;
+      case 'resolveApproval':
+        void this.resolveLocal(payload.approval as Approval, payload.decision as 'approved' | 'rejected');
+        break;
+      case 'toggleFocus':
+        this.toggleFocus();
+        break;
+      case 'focusNote':
+        this.setFocusNote(String(payload.selectionId ?? ''), String(payload.note ?? ''));
+        break;
+      case 'focusRemove':
+        this.removeFocusSelection(String(payload.selectionId ?? ''));
+        break;
+      case 'focusMove':
+        this.moveFocusSelection(String(payload.selectionId ?? ''), payload.dir === 'up' ? 'up' : 'down');
+        break;
+      case 'intentInput':
+        this.onIntentInput(String(payload.value ?? ''));
+        break;
+      case 'commitFocus':
+        void this.commitFocus();
+        break;
+      case 'resumeBundle':
+        void this.resumeCloudBundle(String(payload.bundleId ?? ''));
+        break;
+      case 'switchActor':
+        this.switchActor(String(payload.actor ?? ''));
+        break;
+    }
+  };
 
   private switchActor(value: string): void {
     const [id, type] = value.split(':') as [string, ActorInput['type']];
@@ -360,9 +331,8 @@ export class DemoApp {
     void this.refresh();
   }
 
-  private async applyFilter(): Promise<void> {
+  private async applyFilter(status: string): Promise<void> {
     if (!this.state) return;
-    const status = $<HTMLSelectElement>('filter-select').value;
     const result = await this.gateway.apply({
       command_id: crypto.randomUUID(),
       workspace_id: this.state.manifest.workspace_id,
@@ -399,20 +369,19 @@ export class DemoApp {
   private recordResult(result: CommandResult, label: string): void {
     if (!this.state) return;
     this.state.lastResult = result;
-    const status = $('action-status');
     switch (result.outcome) {
       case 'accepted':
-        status.textContent = `${label}: accepted (revision ${result.revision})`;
+        this.actionStatus = `${label}: accepted (revision ${result.revision})`;
         break;
       case 'pending_approval':
-        status.textContent = `${label}: waiting for approval ${result.approval?.approval_id?.slice(0, 12)}…`;
+        this.actionStatus = `${label}: waiting for approval ${result.approval?.approval_id?.slice(0, 12)}…`;
         break;
       case 'conflict':
-        status.textContent = `${label}: conflict; refresh and retry`;
+        this.actionStatus = `${label}: conflict; refresh and retry`;
         break;
       case 'rejected':
       case 'failed':
-        status.textContent = `${label}: ${result.error?.code ?? result.outcome}: ${result.error?.message ?? ''}`;
+        this.actionStatus = `${label}: ${result.error?.code ?? result.outcome}: ${result.error?.message ?? ''}`;
         break;
     }
   }
@@ -429,7 +398,8 @@ export class DemoApp {
       });
       await this.refresh();
     } catch (error) {
-      $('action-status').textContent = `approval ${decision} failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.actionStatus = `approval ${decision} failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.renderApp();
     }
   }
 
@@ -459,8 +429,7 @@ export class DemoApp {
         (selection) => !(selection.region_id === 'review-table' && selection.node_id && visibleIds.has(selection.node_id)),
       );
     }
-    this.renderTable();
-    this.refreshFocusUI();
+    this.renderApp();
   }
 
   private onRowToggle(row: ReviewRow, checked: boolean): void {
@@ -472,7 +441,7 @@ export class DemoApp {
       this.state.selectedRows.delete(row.id);
       this.removeFocusSelectionForNode(row.id);
     }
-    this.renderTable();
+    this.renderApp();
   }
 
   private tableState(): { rows: ReviewRow[]; table: ReviewTableState } {
@@ -481,79 +450,236 @@ export class DemoApp {
     return { rows: filterRows(table), table };
   }
 
-  private render(): void {
-    if (!this.state) return;
-    const { manifest, projection } = this.state;
-    $('artifact-title').textContent = manifest.title;
-    $('artifact-version').textContent = `version ${manifest.published_version} · revision ${projection.revision} · ${manifest.artifact_id} @ ${manifest.workspace_id}`;
-    this.renderTable();
-    this.renderSummary();
-    this.renderApprovals();
-    this.renderEvents();
-    this.renderAgentNotes();
-    this.updateFocusChrome();
-  }
+  // -------------------------------------------------- view model + document rendering
 
-  private renderTable(): void {
-    if (!this.state) return;
-    const { rows } = this.tableState();
-    const body = $<HTMLElement>('rows-body');
-    body.innerHTML = rows.map((row) => rowTableRow(row, this.state!.selectedRows.has(row.id))).join('');
-    $<HTMLButtonElement>('approve-rows-btn').disabled = this.state.selectedRows.size === 0;
-    $<HTMLInputElement>('select-all').checked =
-      rows.length > 0 && rows.every((row) => this.state!.selectedRows.has(row.id));
-  }
-
-  private renderSummary(): void {
-    if (!this.state) return;
-    const { table } = this.tableState();
+  private buildViewModel(): UIDocumentView {
+    const manifest = this.state?.manifest ?? ({ artifact_id: 'lesson-report', workspace_id: 'ws_demo' } as unknown as Manifest);
+    const projection = this.state?.projection ?? ({ revision: 0, pending_approvals: [], events: [] } as unknown as Projection);
+    const { rows, table } = this.tableState();
     const counts = summarize(table);
-    $('summary-list').innerHTML = [
-      ['Total', counts.total],
-      ['Pending', counts.pending],
-      ['Approved', counts.approved],
-      ['Rejected', counts.rejected],
-    ]
-      .map(([label, value]) => `<li><span>${label}</span><strong>${value}</strong></li>`)
-      .join('');
+    const selected = this.state ? [...this.state.selectedRows] : [];
+    const approvals = projection.pending_approvals;
+    const notes = this.agentNotes;
+    const events = projection.events;
+    const focus = this.state?.focusSelections ?? [];
+    const assessment = focus.length === 0 ? '' : `${this.computeAssessment(focus)}`;
+    return {
+      manifest,
+      projection,
+      reviewTable: { rows, filter: table.filter, selected, actionStatus: this.actionStatus },
+      summary: counts,
+      approvals,
+      focus: {
+        count: focus.length,
+        selections: focus,
+        assessment,
+        intent: this.intentText,
+        runNote: this.runNote,
+        expanded: this.focusExpanded,
+        commitLabel: this.cloudOutbox ? 'Ask Agent with this context' : 'Compose context bundle',
+      },
+      agentNotes: notes,
+      eventLines: events.slice(-12).map((event: Event) => `${event.seq} ${event.type} by ${event.actor.id} → ${JSON.stringify(event.data)}`),
+      outbox: this.buildOutboxView(),
+      transportNote: `transport: ${this.transportLabel}`,
+    };
   }
 
-  private renderApprovals(): void {
-    if (!this.state) return;
-    const pending = this.state.projection.pending_approvals;
-    const list = $<HTMLElement>('approval-list');
-    if (pending.length === 0) {
-      list.innerHTML = '<p class="muted">No pending approvals.</p>';
+  private computeAssessment(focus: Selection[]): string {
+    if (!this.trigger || focus.length === 0) return '';
+    const a = this.trigger.assess(focus, this.intentText);
+    return `${a.intent_kind} · risk ${a.risk} · ${Math.round(a.confidence * 100)}%: ${a.rationale.join(' ')}`;
+  }
+
+  private buildShell(): ShellView {
+    const config = resolveConfig();
+    const manifest = this.state?.manifest;
+    const revision = this.state?.projection.revision ?? 0;
+    const includesConfigActor = ACTOR_OPTIONS.some((actor) => actor.id === config.actor.id);
+    const options = [
+      ...ACTOR_OPTIONS.map((actor) => ({ id: actor.id, type: actor.type ?? 'human', name: actor.name, selected: actor.id === config.actor.id })),
+      ...(!includesConfigActor ? [{ id: config.actor.id, type: config.actor.type ?? 'human', name: config.actor.name ?? `Authenticated actor (${config.actor.id})`, selected: true }] : []),
+    ];
+    return {
+      title: manifest?.title ?? 'Lesson report',
+      versionLine: manifest ? `version ${manifest.published_version} · revision ${revision} · ${manifest.artifact_id} @ ${manifest.workspace_id}` : '',
+      transportNote: `transport: ${this.transportLabel}`,
+      actorValue: `${config.actor.id}:${config.actor.type ?? 'human'}`,
+      actorOptions: options,
+      actorDisabled: Boolean(this.authenticated),
+      actorTitle: 'Actor is fixed by the authenticated Artifact session',
+      onActorChange: (value) => this.dispatch('switchActor', { actor: value }),
+    };
+  }
+
+  private authenticated = false;
+
+  /**
+   * Draft-only builder surface. Read a validated UiDocument patch from the
+   * `?ui_patch=` query and, only if it passes the catalog allowlists, swap the
+   * live document and re-render. Invalid patches surface as an error line and
+   * never touch application state, the manifest, or production contracts.
+   */
+  private applyDraft(): void {
+    const patch = readDraftPatchParam();
+    if (patch === undefined) return;
+    const result = applyUiDocumentPatch(activeDocument, patch);
+    if (result.ok) {
+      activeDocument = result.document;
+      this.renderApp();
       return;
     }
-    list.innerHTML = pending
-      .map(
-        (approval) => `<div class="approval-card">
-          <p><strong>${escapeHtml(approval.message)}</strong></p>
-          <p class="muted">${approval.kind}${approval.capability ? ` · ${approval.capability}` : ''} · requested by ${escapeHtml(approval.requested_by.id)}</p>
-          <div class="approval-actions">
-            <button class="btn btn-approve" data-approval="${approval.approval_id}" data-decision="approved">Approve</button>
-            <button class="btn btn-reject" data-approval="${approval.approval_id}" data-decision="rejected">Reject</button>
-          </div>
-        </div>`,
-      )
-      .join('');
-    list.querySelectorAll('button[data-approval]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const approval = pending.find((a) => a.approval_id === button.getAttribute('data-approval'));
-        if (approval) void this.resolveLocal(approval, button.getAttribute('data-decision') as 'approved' | 'rejected');
-      });
+    const note = document.getElementById('transport-note');
+    if (note) note.textContent = `ui_draft rejected: ${result.message}`;
+  }
+
+  private renderApp(): void {
+    if (typeof document === 'undefined') return;
+    const root = document.getElementById('app');
+    if (!root) return;
+    // Defensive: the active document is validated before every render; a builder
+    // draft may replace it only after passing the same validator (see applyDraft).
+    const errors = validateDocument(activeDocument);
+    if (errors.length > 0) {
+      root.textContent = `UI document is invalid at render time: ${errors[0]}`;
+      return;
+    }
+    renderApp(root, activeDocument, this.buildViewModel(), this.buildShell(), this.dispatch);
+  }
+
+  // -------------------------------------------------- focus set + trigger
+
+  private focusSelections(): Selection[] {
+    return this.state?.focusSelections ?? [];
+  }
+
+  private addFocusSelection(sel: Selection): void {
+    if (!this.state) return;
+    const key = `${sel.artifact_id}|${sel.revision}|${sel.region_id}|${sel.node_id ?? ''}`;
+    const exists = this.state.focusSelections.some(
+      (s) => `${s.artifact_id}|${s.revision}|${s.region_id}|${s.node_id ?? ''}` === key,
+    );
+    if (!exists) this.state.focusSelections.push(sel);
+    this.renderApp();
+  }
+
+  private addFocusNode(row: ReviewRow): void {
+    if (!this.state) return;
+    this.addFocusSelection({
+      selection_id: newSelectionId(),
+      artifact_id: this.state.manifest.artifact_id,
+      revision: this.state.projection.revision,
+      region_id: 'review-table',
+      region_title: 'Review table',
+      node_id: row.id,
+      label: `${row.student} · ${row.topic}`,
     });
   }
 
-  private renderEvents(): void {
+  private focusRegion(regionId: string): void {
     if (!this.state) return;
-    const events = this.state.projection.events;
-    const lines = events
-      .slice(-12)
-      .map((event: Event) => `${event.seq} ${event.type} by ${event.actor.id} → ${JSON.stringify(event.data)}`)
-      .join('\n');
-    $('event-log').textContent = lines === '' ? '(no events yet; commands will appear here)' : lines;
+    const region = this.state.manifest.regions.find((r) => r.id === regionId);
+    this.addFocusSelection({
+      selection_id: newSelectionId(),
+      artifact_id: this.state.manifest.artifact_id,
+      revision: this.state.projection.revision,
+      region_id: regionId,
+      region_title: region?.title,
+      label: region?.title ?? regionId,
+    });
+  }
+
+  private removeFocusSelection(selectionId: string): void {
+    if (!this.state) return;
+    const sel = this.state.focusSelections.find((s) => s.selection_id === selectionId);
+    if (sel?.node_id) this.state.selectedRows.delete(sel.node_id);
+    this.state.focusSelections = this.state.focusSelections.filter((s) => s.selection_id !== selectionId);
+    this.renderApp();
+  }
+
+  private removeFocusSelectionForNode(nodeId: string): void {
+    if (!this.state) return;
+    this.state.focusSelections = this.state.focusSelections.filter(
+      (s) => !(s.region_id === 'review-table' && s.node_id === nodeId),
+    );
+    this.renderApp();
+  }
+
+  private moveFocusSelection(selectionId: string, dir: 'up' | 'down'): void {
+    if (!this.state) return;
+    const arr = this.state.focusSelections;
+    const idx = arr.findIndex((s) => s.selection_id === selectionId);
+    const to = dir === 'up' ? idx - 1 : idx + 1;
+    if (idx < 0 || to < 0 || to >= arr.length) return;
+    const a = arr[idx]!;
+    const b = arr[to]!;
+    arr[idx] = b;
+    arr[to] = a;
+    this.renderApp();
+  }
+
+  private toggleFocus(): void {
+    this.focusExpanded = !this.focusExpanded;
+    this.renderApp();
+  }
+
+  private setFocusNote(selectionId: string, note: string): void {
+    const sel = this.focusSelections().find((s) => s.selection_id === selectionId);
+    if (sel) sel.note = note;
+    // No re-render on keystroke: the input already reflects the value.
+  }
+
+  private onIntentInput(value: string): void {
+    this.intentText = value;
+    this.renderAssessment();
+  }
+
+  /** Narrow update of the live assessment line only (preserves textarea focus). */
+  private renderAssessment(): void {
+    const focus = this.focusSelections();
+    const assessment = focus.length === 0 ? '' : this.computeAssessment(focus);
+    const out = document.getElementById('focus-assessment');
+    if (out) out.textContent = assessment;
+    const commit = document.getElementById('focus-commit') as HTMLButtonElement | null;
+    if (commit) commit.disabled = focus.length === 0;
+  }
+
+  private async commitFocus(): Promise<void> {
+    if (!this.state || !this.trigger) return;
+    const sels = this.state.focusSelections;
+    if (sels.length === 0) return;
+    const intent = this.intentText;
+    const deferred = this.turnActive;
+    let note = '';
+    try {
+      const result = await this.trigger.execute(sels, intent, { defer: deferred });
+      const failed = result.receipts.filter((receipt) => !receipt.ok).length;
+      const cloudStaged = this.cloudOutbox
+        ? result.receipts.filter((receipt) => {
+            const cloud = receipt as Partial<CloudHostDeliveryReceipt>;
+            return cloud.task_status === 'unavailable' && cloud.kind === 'queued';
+          }).length
+        : 0;
+      if (deferred) {
+        note = this.cloudOutbox
+          ? 'Run active: the Cloud task stayed local and was not injected mid-turn; resend it explicitly after this turn.'
+          : 'Run active: bundles queued for the next turn, not injected mid-turn.';
+      } else if (this.cloudOutbox) {
+        note = cloudStaged > 0
+          ? `Cloud Host created ${result.receipts.length - cloudStaged} task${result.receipts.length - cloudStaged === 1 ? '' : 's'}; ${cloudStaged} additional context${cloudStaged === 1 ? '' : 's'} stayed queued for a separate explicit click.`
+          : failed === 0
+          ? `Cloud Host accepted ${result.receipts.length} context ${result.receipts.length === 1 ? 'task' : 'tasks'}; the Agent turn and application receipt appear below.`
+          : `Cloud Host did not create ${failed} ${failed === 1 ? 'task' : 'tasks'}; inspect the staged receipt below.`;
+      } else if (this.bridgeClient) {
+        note = failed === 0
+          ? `Bridge accepted ${result.receipts.length} context ${result.receipts.length === 1 ? 'bundle' : 'bundles'}; receipt state is shown below.`
+          : `Bridge delivery failed for ${failed} ${failed === 1 ? 'bundle' : 'bundles'}; inspect the receipt below.`;
+      }
+    } catch (error) {
+      note = `Context delivery failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    this.runNote = note;
+    this.renderApp();
   }
 
   // -------------------------------------------------- Cloud Artifact page contract
@@ -687,7 +813,7 @@ export class DemoApp {
     const receipt = appliedReceipt(note, nextNotes.length);
     this.resultReceipts.set(request.result_id, receipt);
     this.resultFingerprints.set(request.result_id, fingerprint);
-    this.renderAgentNotes();
+    this.renderApp();
     return receipt;
   }
 
@@ -700,239 +826,15 @@ export class DemoApp {
     }
   }
 
-  private renderAgentNotes(): void {
-    const list = document.getElementById('agent-notes-list');
-    if (!list) return;
-    if (this.agentNotes.length === 0) {
-      list.innerHTML = '<li class="muted">No Agent notes yet. A completed Cloud task will appear here.</li>';
-      return;
-    }
-    list.innerHTML = [...this.agentNotes]
-      .reverse()
-      .map((note) => `<li class="agent-note-item">
-        <p class="agent-note-summary">${escapeHtml(note.summary)}</p>
-        <p class="outbox-meta muted">${note.row_ids.length > 0 ? `Rows: ${escapeHtml(note.row_ids.join(', '))} · ` : ''}${escapeHtml(note.applied_at)}</p>
-        ${note.recommendations.length > 0 ? `<ul class="agent-note-recommendations">${note.recommendations.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
-      </li>`)
-      .join('');
-  }
+  // -------------------------------------------------- outbox view model
 
-  // -------------------------------------------------- focus set + trigger
-
-  private focusSelections(): Selection[] {
-    return this.state?.focusSelections ?? [];
-  }
-
-  private addFocusSelection(sel: Selection): void {
-    if (!this.state) return;
-    const key = `${sel.artifact_id}|${sel.revision}|${sel.region_id}|${sel.node_id ?? ''}`;
-    const exists = this.state.focusSelections.some(
-      (s) => `${s.artifact_id}|${s.revision}|${s.region_id}|${s.node_id ?? ''}` === key,
-    );
-    if (!exists) this.state.focusSelections.push(sel);
-    this.refreshFocusUI();
-  }
-
-  private addFocusNode(row: ReviewRow): void {
-    if (!this.state) return;
-    this.addFocusSelection({
-      selection_id: newSelectionId(),
-      artifact_id: this.state.manifest.artifact_id,
-      revision: this.state.projection.revision,
-      region_id: 'review-table',
-      region_title: 'Review table',
-      node_id: row.id,
-      label: `${row.student} · ${row.topic}`,
-    });
-  }
-
-  private focusRegion(regionId: string): void {
-    if (!this.state) return;
-    const region = this.state.manifest.regions.find((r) => r.id === regionId);
-    this.addFocusSelection({
-      selection_id: newSelectionId(),
-      artifact_id: this.state.manifest.artifact_id,
-      revision: this.state.projection.revision,
-      region_id: regionId,
-      region_title: region?.title,
-      label: region?.title ?? regionId,
-    });
-  }
-
-  private removeFocusSelection(selectionId: string): void {
-    if (!this.state) return;
-    const sel = this.state.focusSelections.find((s) => s.selection_id === selectionId);
-    if (sel?.node_id) this.state.selectedRows.delete(sel.node_id);
-    this.state.focusSelections = this.state.focusSelections.filter((s) => s.selection_id !== selectionId);
-    this.renderTable(); // uncheck the corresponding row, if any
-    this.refreshFocusUI();
-  }
-
-  private removeFocusSelectionForNode(nodeId: string): void {
-    if (!this.state) return;
-    this.state.focusSelections = this.state.focusSelections.filter(
-      (s) => !(s.region_id === 'review-table' && s.node_id === nodeId),
-    );
-    this.refreshFocusUI();
-  }
-
-  private moveFocusSelection(selectionId: string, dir: 'up' | 'down'): void {
-    if (!this.state) return;
-    const arr = this.state.focusSelections;
-    const idx = arr.findIndex((s) => s.selection_id === selectionId);
-    const to = dir === 'up' ? idx - 1 : idx + 1;
-    if (idx < 0 || to < 0 || to >= arr.length) return;
-    const a = arr[idx]!;
-    const b = arr[to]!;
-    arr[idx] = b;
-    arr[to] = a;
-    this.renderFocusList();
-  }
-
-  private toggleFocus(): void {
-    const body = $<HTMLElement>('focus-body');
-    const toggle = $<HTMLButtonElement>('focus-toggle');
-    const open = body.hidden;
-    body.hidden = !open;
-    toggle.setAttribute('aria-expanded', String(open));
-    toggle.textContent = open ? 'Close' : 'Compose';
-    if (open) {
-      this.renderFocusList();
-      this.renderLiveAssessment();
-    }
-  }
-
-  private renderFocusList(): void {
-    const list = $<HTMLElement>('focus-list');
-    const sels = this.focusSelections();
-    if (sels.length === 0) {
-      list.innerHTML =
-        '<li class="muted">No selections yet. Click a region’s “Focus region” button or check rows.</li>';
-      return;
-    }
-    list.innerHTML = sels
-      .map(
-        (s, i) => `<li class="focus-item" data-selection-id="${escapeHtml(s.selection_id)}">
-        <div class="focus-item-main">
-          <span class="focus-item-reorder">
-            <button class="btn btn-mini" data-act="up" aria-label="Move up" ${i === 0 ? 'disabled' : ''}>↑</button>
-            <button class="btn btn-mini" data-act="down" aria-label="Move down" ${i === sels.length - 1 ? 'disabled' : ''}>↓</button>
-          </span>
-          <span class="focus-item-label">${escapeHtml(s.label)}</span>
-          <button class="btn btn-mini" data-act="remove" aria-label="Remove ${escapeHtml(s.label)}">✕</button>
-        </div>
-        <input class="focus-item-note" data-act="note" value="${escapeHtml(s.note ?? '')}" placeholder="Optional note" aria-label="Note for ${escapeHtml(s.label)}" />
-      </li>`,
-      )
-      .join('');
-  }
-
-  private onFocusListAction(e: MouseEvent): void {
-    const target = e.target as HTMLElement;
-    const btn = target.closest<HTMLButtonElement>('button[data-act]');
-    if (!btn) return;
-    const li = btn.closest<HTMLElement>('li[data-selection-id]');
-    if (!li) return;
-    const id = li.dataset.selectionId ?? '';
-    const act = btn.dataset.act;
-    if (act === 'remove') this.removeFocusSelection(id);
-    else if (act === 'up' || act === 'down') this.moveFocusSelection(id, act);
-  }
-
-  private onFocusNote(e: InputEvent): void {
-    const input = e.target as HTMLInputElement;
-    if (!input.classList.contains('focus-item-note')) return;
-    const li = input.closest<HTMLElement>('li[data-selection-id]');
-    if (!li) return;
-    const sel = this.focusSelections().find((s) => s.selection_id === li.dataset.selectionId);
-    if (sel) sel.note = input.value;
-  }
-
-  private onIntentInput(): void {
-    this.renderLiveAssessment();
-  }
-
-  private renderLiveAssessment(): void {
-    const out = $<HTMLElement>('focus-assessment');
-    const sels = this.focusSelections();
-    $<HTMLButtonElement>('focus-commit').disabled = sels.length === 0;
-    if (sels.length === 0 || !this.trigger) {
-      out.textContent = '';
-      return;
-    }
-    const text = ($('focus-intent') as HTMLTextAreaElement).value;
-    const a = this.trigger.assess(sels, text);
-    out.textContent =
-      `${a.intent_kind} · risk ${a.risk} · ${Math.round(a.confidence * 100)}%: ${a.rationale.join(' ')}`;
-  }
-
-  private async commitFocus(): Promise<void> {
-    if (!this.state || !this.trigger) return;
-    const sels = this.state.focusSelections;
-    if (sels.length === 0) return;
-    const intent = ($('focus-intent') as HTMLTextAreaElement).value;
-    const deferred = this.turnActive;
-    try {
-      const result = await this.trigger.execute(sels, intent, { defer: deferred });
-      const failed = result.receipts.filter((receipt) => !receipt.ok).length;
-      const note = $<HTMLElement>('focus-run-note');
-      const cloudStaged = this.cloudOutbox
-        ? result.receipts.filter((receipt) => {
-            const cloud = receipt as Partial<CloudHostDeliveryReceipt>;
-            return cloud.task_status === 'unavailable' && cloud.kind === 'queued';
-          }).length
-        : 0;
-      if (deferred) {
-        note.hidden = false;
-        note.textContent = this.cloudOutbox
-          ? 'Run active: the Cloud task stayed local and was not injected mid-turn; resend it explicitly after this turn.'
-          : 'Run active: bundles queued for the next turn, not injected mid-turn.';
-      } else if (this.cloudOutbox) {
-        note.hidden = false;
-        note.textContent = cloudStaged > 0
-          ? `Cloud Host created ${result.receipts.length - cloudStaged} task${result.receipts.length - cloudStaged === 1 ? '' : 's'}; ${cloudStaged} additional context${cloudStaged === 1 ? '' : 's'} stayed queued for a separate explicit click.`
-          : failed === 0
-          ? `Cloud Host accepted ${result.receipts.length} context ${result.receipts.length === 1 ? 'task' : 'tasks'}; the Agent turn and application receipt appear below.`
-          : `Cloud Host did not create ${failed} ${failed === 1 ? 'task' : 'tasks'}; inspect the staged receipt below.`;
-      } else if (this.bridgeClient) {
-        note.hidden = false;
-        note.textContent = failed === 0
-          ? `Bridge accepted ${result.receipts.length} context ${result.receipts.length === 1 ? 'bundle' : 'bundles'}; receipt state is shown below.`
-          : `Bridge delivery failed for ${failed} ${failed === 1 ? 'bundle' : 'bundles'}; inspect the receipt below.`;
-      } else {
-        note.hidden = true;
-      }
-    } catch (error) {
-      const note = $<HTMLElement>('focus-run-note');
-      note.hidden = false;
-      note.textContent = `Context delivery failed: ${error instanceof Error ? error.message : String(error)}`;
-    }
-    this.renderOutbox();
-  }
-
-  private updateFocusChrome(): void {
-    if (!this.state) return;
-    $<HTMLElement>('focus-count').textContent = String(this.state.focusSelections.length);
-    $<HTMLButtonElement>('focus-commit').disabled = this.state.focusSelections.length === 0;
-  }
-
-  private refreshFocusUI(): void {
-    this.updateFocusChrome();
-    this.renderFocusList();
-    this.renderLiveAssessment();
-  }
-
-  private renderOutbox(): void {
-    if (!this.trigger) return;
-    const list = $<HTMLElement>('outbox-list');
+  private buildOutboxView(): { label: string; items: OutboxItemView[] } {
+    const label = this.trigger ? `outbox: ${this.trigger.outboxLabel()}` : '';
     if (this.cloudOutbox) {
       const receipts = this.cloudOutbox.listReceipts();
-      if (receipts.length === 0) {
-        list.innerHTML = '<li class="muted">No Cloud tasks yet. Compose a focus set and explicitly ask the Agent.</li>';
-        return;
-      }
-      list.innerHTML = receipts
-        .map((receipt: CloudHostDeliveryReceipt) => {
+      return {
+        label,
+        items: receipts.map((receipt: CloudHostDeliveryReceipt) => {
           const state = !receipt.ok
             ? receipt.kind === 'rejected' ? 'rejected' : 'failed'
             : receipt.task_status === 'unavailable'
@@ -944,77 +846,81 @@ export class DemoApp {
             && receipt.kind === 'queued'
             && receipt.task_status === 'unavailable'
             && this.cloudOutbox?.isResumable(receipt.bundle_id) === true;
-          return `<li class="outbox-item" data-bundle-id="${escapeHtml(receipt.bundle_id)}">
-          <div class="outbox-head">
-            <span class="badge ${receiptBadge(state)}">${escapeHtml(state)}</span>
-            <span class="outbox-title">${escapeHtml(receipt.bundle_id)}</span>
-            ${receipt.task_id ? `<span class="muted">task ${escapeHtml(receipt.task_id)}</span>` : ''}
-          </div>
-          <p class="outbox-meta muted">${escapeHtml(receipt.message)}</p>
-          ${receipt.application_status ? `<p class="outbox-meta muted">application receipt: ${escapeHtml(receipt.application_status)}</p>` : ''}
-          ${canResume ? `<button class="btn btn-small" data-cloud-resume="${escapeHtml(receipt.bundle_id)}">Send now</button>` : ''}
-        </li>`;
-        })
-        .join('');
-      return;
+          const meta: string[] = [];
+          if (receipt.task_id) meta.push(`task ${receipt.task_id}`);
+          if (receipt.application_status) meta.push(`application receipt: ${receipt.application_status}`);
+          return {
+            kind: 'receipt',
+            bundleId: receipt.bundle_id,
+            state,
+            stateKind: this.stateKind(state),
+            title: receipt.bundle_id,
+            message: receipt.message,
+            meta,
+            canResume,
+          };
+        }),
+      };
     }
     if (this.bridgeClient) {
-      const receipts = this.trigger.outboxReceipts();
-      if (receipts.length === 0) {
-        list.innerHTML = '<li class="muted">No bridge receipts yet. Compose a focus set to submit context.</li>';
-        return;
-      }
-      list.innerHTML = receipts
-        .map(
-          (receipt) => `<li class="outbox-item" data-bundle-id="${escapeHtml(receipt.bundle_id)}">
-          <div class="outbox-head">
-            <span class="badge ${receiptBadge(receipt.bridged_state ?? receipt.kind)}">${escapeHtml(receipt.bridged_state ?? receipt.kind)}</span>
-            <span class="outbox-title">${escapeHtml(receipt.bundle_id)}</span>
-            ${receipt.receipt_id ? `<span class="muted">receipt ${escapeHtml(receipt.receipt_id)}</span>` : ''}
-          </div>
-          <p class="outbox-meta muted">${escapeHtml(receipt.message)}</p>
-        </li>`,
-        )
-        .join('');
-      return;
+      const receipts = this.trigger?.outboxReceipts() ?? [];
+      return {
+        label,
+        items: receipts.map((receipt) => {
+          const state = receipt.bridged_state ?? receipt.kind;
+          const meta: string[] = [];
+          if (receipt.receipt_id) meta.push(`receipt ${receipt.receipt_id}`);
+          return {
+            kind: 'receipt',
+            bundleId: receipt.bundle_id,
+            state,
+            stateKind: this.stateKind(state),
+            title: receipt.bundle_id,
+            message: receipt.message,
+            meta,
+            canResume: false,
+          };
+        }),
+      };
     }
-    const bundles = this.trigger.outboxBundles();
-    if (bundles.length === 0) {
-      list.innerHTML = '<li class="muted">No context bundles yet. Compose a focus set to create one.</li>';
-      return;
-    }
-    list.innerHTML = bundles
-      .map(
-        (b: ContextBundle) => `<li class="outbox-item" data-bundle-id="${escapeHtml(b.bundle_id)}">
-        <div class="outbox-head">
-          <span class="badge ${decisionBadge(b.decision)}">${escapeHtml(b.decision)}</span>
-          <span class="outbox-title">${escapeHtml(String(b.selections.length))} ${b.selections.length === 1 ? 'item' : 'items'} · ${escapeHtml(b.artifact_id)}</span>
-          <span class="muted">@${escapeHtml(b.session_id)}</span>
-        </div>
-        <p class="outbox-text"><strong>intent:</strong> ${escapeHtml(b.intent.text || '(none · collect only)')} · ${escapeHtml(b.assessment.intent_kind)} · risk ${escapeHtml(b.assessment.risk)} · ${Math.round(b.assessment.confidence * 100)}%</p>
-        <p class="outbox-meta muted"><strong>delivery:</strong> ${escapeHtml(b.delivery)}: ${escapeHtml(b.assessment.rationale.join(' '))}</p>
-        ${b.context_ref ? `<p class="outbox-meta muted"><strong>context_ref:</strong> ${escapeHtml(b.context_ref)}</p>` : ''}
-      </li>`,
-      )
-      .join('');
+    const bundles = this.trigger?.outboxBundles() ?? [];
+    return {
+      label,
+      items: bundles.map((b: ContextBundle) => ({
+        kind: 'bundle',
+        bundleId: b.bundle_id,
+        state: b.decision,
+        stateKind: this.stateKind(b.decision),
+        title: `${b.selections.length} ${b.selections.length === 1 ? 'item' : 'items'} · ${b.artifact_id}`,
+        message: `intent: ${b.intent.text || '(none · collect only)'} · ${b.assessment.intent_kind} · risk ${b.assessment.risk} · ${Math.round(b.assessment.confidence * 100)}%\ndelivery: ${b.delivery}: ${b.assessment.rationale.join(' ')}`,
+        meta: [`@${b.session_id}`, ...(b.context_ref ? [`context_ref: ${b.context_ref}`] : [])],
+        canResume: false,
+      })),
+    };
+  }
+
+  private stateKind(state: string): OutboxItemView['stateKind'] {
+    if (state === 'approved' || state === 'accepted' || state === 'completed' || state === 'acknowledged' || state === 'sent' || state === 'send') return 'approved';
+    if (state === 'rejected' || state === 'expired' || state === 'failed' || state === 'unavailable' || state === 'confirm') return 'rejected';
+    if (state === 'suggest' || state === 'queued' || state === 'needs_confirm' || state === 'collecting' || state === 'suggested') return 'pending';
+    return 'decision';
   }
 
   private async resumeCloudBundle(bundleId: string): Promise<void> {
     if (!this.cloudOutbox || bundleId === '' || !this.cloudOutbox.isResumable(bundleId)) return;
-    const note = $<HTMLElement>('focus-run-note');
-    note.hidden = false;
-    note.textContent = 'Sending the staged context through the Cloud Artifact Host…';
+    this.runNote = 'Sending the staged context through the Cloud Artifact Host…';
+    this.renderApp();
     try {
       const receipt = await this.cloudOutbox.resume(bundleId);
-      note.textContent = receipt.ok && receipt.task_id
+      this.runNote = receipt.ok && receipt.task_id
         ? 'Cloud Host accepted the staged context; follow its task and application receipt below.'
         : receipt.ok
           ? 'The staged context remains queued; use Send now after the Host is connected and the click is active.'
           : `Cloud Host could not send the staged context: ${receipt.message}`;
     } catch (error) {
-      note.textContent = `Cloud Host resume failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.runNote = `Cloud Host resume failed: ${error instanceof Error ? error.message : String(error)}`;
     }
-    this.renderOutbox();
+    this.renderApp();
   }
 
   private startBridgeWatch(client: BridgeClient, outbox: BridgeOutbox): void {
@@ -1023,7 +929,7 @@ export class DemoApp {
         for await (const envelope of client.watch(undefined, { timeoutMs: 60000 })) {
           if (envelope.kind === 'receipt') {
             outbox.ingest(envelope.receipt);
-            this.renderOutbox();
+            this.renderApp();
           }
         }
       } catch {
@@ -1056,7 +962,6 @@ export class DemoApp {
               this.turnActive = true;
               await this.refresh();
               this.turnActive = false;
-              this.renderOutbox();
             }
           } else if (envelope.kind === 'done') {
             break;
@@ -1078,6 +983,11 @@ export async function initDemo(): Promise<void> {
   const { gateway, transport } = await createGateway(config);
   const demo = new DemoApp(gateway, transport);
   await demo.start();
+}
+
+// Exposed for the draft/builder surface (dev-only) — see the ui-draft test hook.
+export function currentDocument(): UiDocument {
+  return activeDocument;
 }
 
 if (typeof document !== 'undefined') {

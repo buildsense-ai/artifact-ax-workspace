@@ -16,7 +16,8 @@
     "@artifact-ax/contract": "workspace:*",
     "@artifact-ax/domain": "workspace:*",
     "@artifact-ax/lesson-report": "workspace:*",
-    "@artifact-ax/trigger": "workspace:*"
+    "@artifact-ax/trigger": "workspace:*",
+    "@artifact-ax/ui-document": "workspace:*"
   },
   "devDependencies": {
     "vite": "^6.0.0"

@@ -1,0 +1,22 @@
+{
+  "name": "@artifact-ax/ui-document",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Versioned declarative UI-document contract: an approved component catalog, data bindings, semantic event bindings, and validated patches. Rejects unknown and raw executable presentation inputs.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@artifact-ax/contract": "workspace:*"
+  }
+}

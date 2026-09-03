@@ -209,6 +209,35 @@ copy of the Skill's publisher, injected bridge, or Agent runtime.
 See [12-cloud-artifact-host.md](12-cloud-artifact-host.md) for the boundary,
 manifest IDs, local commands, and explicit non-goals.
 
+## JSON-rendered agentic UI (fifth slice)
+
+The demo SPA surfaces are now declaratively driven by a versioned UI document,
+rendered by a small fixed-catalog renderer. This is the artifact-ax take on a
+JSON-rendered agentic UI: most business UI is composable through a validated
+document, but there is no generic Artifact runtime and no agent-controlled code
+execution.
+
+| Surface | Status |
+| --- | --- |
+| `@artifact-ax/ui-document`: `UiDocument` contract, fixed `CATALOG`, safe data-bindings, semantic event-bindings, validated patches; catalog/prop/binding/event allowlist enforcement + raw-executable-input rejection | implemented + tested |
+| `lesson-report.document.ts`: the declarative document for the report surfaces | implemented (validated at render time) |
+| `catalog-renderer.ts`: constrained catalog renderer that walks the document and renders each approved surface (bindings resolved, events dispatched to the gateway) | implemented + browser-verified |
+| `ui-draft.ts` + `?ui_patch=`: draft-only patch application boundary | implemented + unit-tested |
+| Stable `data-region-id`/`data-node-id`/`data-artifact-id` anchors, projection + semantic command/event seams, Cloud Host/task/result sink behavior | preserved |
+| React + Vercel json-render + shadcn/Base UI catalog | **not used**: would require converting the framework-free SPA and re-implementing its DOM-coupled transport/bridge/Cloud Host wiring; an equally constrained catalog renderer is used instead (reason documented in README) |
+| Generic, extensible Artifact runtime or agent-controlled UI code | **out of scope**: the catalog is closed and props/bindings/events are allowlisted; no raw HTML/JS/CSS input is accepted |
+| Formal production manifest/task/result contract change | **not done**: the patch path is local draft-only; `artifact-manifest.json`, `docs/13` and the lesson-report Skill contract are unchanged |
+
+### Carry-over rules
+
+- The document is version-level UI metadata (V1); it carries no rows,
+  selections, prompts, credentials, or permission claims.
+- A builder patch is applied only after the same catalog allowlist validation;
+  invalid patches are rejected and never touch application state.
+- The renderer uses `textContent` for all dynamic text; it never emits untrusted
+  text as HTML, never executes a document value, and cannot reach browser
+  secrets or bypass command/permission policy.
+
 ## XiaoBa Skill deployment (formal path)
 
 The deployed Agent uses two installed Skills, with no standalone Bridge:

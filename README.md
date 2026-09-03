@@ -196,6 +196,91 @@ command and human approval flow. A production application can replace the
 localStorage sink with its own durable store while keeping the same manifest
 and receipt boundary.
 
+## JSON-rendered agentic UI (fifth slice)
+
+The demo SPA's business surfaces are now driven by a **versioned declarative UI
+document**, not a one-off static DOM template. A new standalone package,
+`@artifact-ax/ui-document`, owns the contract; the SPA owns a small, fixed
+catalog renderer that walks it.
+
+### Package: `@artifact-ax/ui-document`
+
+A typed, framework-free contract that enforces catalog/prop/binding/event
+allowlists before any renderer touches a document:
+
+- `UiDocument` (`artifact-ax.ui-document.v1`): a list of composable `UiNode`s,
+  each referencing a fixed catalog kind, with optional `props`, data
+  `bindings`, and semantic `events`.
+- **Approved component catalog** (`CATALOG`): the closed set of surfaces that
+  may appear in a document (`review-table`, `summary-list`, `approval-list`,
+  `focus-composer`, `agent-notes`, `event-log`, `context-outbox`). Each entry
+  hard-declares its allowed props, binding names, and semantic actions.
+- **Data bindings**: a named binding maps to a safe dot-path into a
+  projection-derived view model. Paths are validated (identifier segments only;
+  `__proto__`/`constructor`/`prototype` rejected) and resolved by
+  `resolvePath`/`resolveNodeBindings`.
+- **Semantic event bindings**: a node's `events` maps a DOM event to an
+  allowlisted action (e.g. `rowToggle → toggleRow`,
+  `approve → approveRows`). Unknown events and non-allowlisted actions are
+  rejected at validation time.
+- **Patches** (`archive.ax.ui-document-patch.v1`): `applyPatch` validates every
+  op (insert/update/remove) against the catalog and a base document revision,
+  then returns a new document; the original is never mutated.
+- **Security boundary**: props are primitives only; keys like `on*`,
+  `innerHTML`, `style`, `href`, `src`, `dangerouslySetInnerHTML` are rejected,
+  and string props containing script/iframe/event-handler markup are rejected.
+  No value is ever treated as executable presentation.
+
+The package is dependency-free for its contract layer (it imports only
+`@artifact-ax/contract` for the schema-property shape) and ships focused unit
+tests for validation and patch behavior.
+
+### Renderer decision
+
+The preferred route was **React + Vercel json-render with a shadcn/Base UI
+catalog**. That combination would have required converting the incumbent
+framework-free SPA to React and re-implementing its DOM-coupled transport,
+bridge, and Cloud Host wiring, which risked the standalone/no-runtime boundary
+and the mock/cloud-host backwards compatibility this workspace guarantees.
+
+Instead the SPA uses an **equally constrained catalog renderer**: a single
+`catalog-renderer.ts` that walks a validated `UiDocument` and renders each
+approved surface from the catalog, resolving bindings against the view model
+and wiring semantic events through one dispatch seam into the existing
+`AxGateway`. This is a genuine data-driven JSON renderer (not a hardcoded DOM
+template) — the document is the source of screen structure, and the renderer is
+closed to the fixed catalog. The reason for not using Vercel json-render is
+documented here rather than faking the requirement with a static template.
+
+### SPA integration
+
+`apps/demo-spa/src/ui/` contains:
+
+- `lesson-report.document.ts` — the declarative `UiDocument` for the report.
+- `catalog-renderer.ts` — the constrained catalog renderer (DOM built with
+  `textContent`, never innerHTML with untrusted text).
+- `view-model.ts` — the projection-derived `UIDocumentView`.
+- `ui-draft.ts` — the draft-only patch boundary.
+
+`DemoApp` builds the view model from the projection and semantic state, then
+calls the renderer. All mutation still goes through semantic commands on the
+gateway; the production Cloud Host/task/result sink (`getContext`/`applyResult`)
+is unchanged. Stable `data-region-id`/`data-node-id` anchors and the
+`#app` `data-artifact-id`/`data-workspace-id` attributes are preserved.
+
+### V1 limits (honest)
+
+- **Fixed catalog, one document model.** Only the seven listed surfaces exist;
+  adding one means extending the package catalog, the renderer, and tests.
+- **Draft-only patch.** A builder can submit a validated `?ui_patch=` patch that
+  re-renders the same surfaces. It is local-only and never writes into the
+  production manifest, the XiaoBa task/result contract, or any cats-company
+  surface. `docs/13`, `artifact-manifest.json`, and the lesson-report Skill
+  contract are **unchanged** — the formal task/result writer stays as-is.
+- **No generic runtime or agent-controlled code execution.** The document cannot
+  emit raw HTML/JS/CSS, access browser secrets, or bypass command/permission
+  policy.
+
 ## XiaoBa Skills: formal deployment path
 
 Deploy exactly two composable Skills to the target XiaoBa Agent:
@@ -304,11 +389,12 @@ packages/
   trigger/         # intelligent trigger MVP + local Bridge + AG-UI + Cloud Host adapter
   auth/            # CatsCo introspection seam, opaque sessions, browser client
   lesson-report/   # example structured artifact spec + capability handlers
+  ui-document/     # versioned declarative UI document contract + catalog + patches
   catsco-adapter/  # Artifact node server + browser-safe HTTP gateway client
 apps/
   artifactctl/     # JSON CLI over the AX gateway (thick gateway, thin client)
   artifact-bridge/ # developer-only Agent Bridge server (loopback HTTP inbox; in-memory or durable JSON-file store)
-  demo-spa/        # teaching-report SPA + Cloud Artifact page/task/writeback surface
+  demo-spa/        # teaching-report SPA + Cloud Artifact page/task/writeback surface, document-rendered via ui-document
 skills/
   lesson-report-artifact/ # XiaoBa domain Skill source
 skill-packages/    # validated portable Skill archive
@@ -325,7 +411,9 @@ docs/              # design docs (unchanged) + roadmap.md
   `HttpAxGateway` (HTTP) implement the same `AxGateway` interface; the SPA
   uses whichever is reachable.
 - **No generic runtime**: the SPA is an ordinary application; nothing is
-  injected into artifacts at runtime.
+  injected into artifacts at runtime. The business surfaces are rendered from a
+  validated declarative document against a fixed, approved catalog — no
+  agent-controlled code execution and no raw HTML/JS/CSS inputs.
 - **CatsCo is an external adapter target**: the contract and domain don't
   import cats-company code; `packages/catsco-adapter` renders the upstream
   JSON and speaks the upstream route/URL/error contract (verified
