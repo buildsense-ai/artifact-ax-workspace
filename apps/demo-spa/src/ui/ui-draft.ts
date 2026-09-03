@@ -88,9 +88,24 @@ export function applyUiDocumentPatch(base: UiDocument, patch: unknown): DraftApp
   return result;
 }
 
-/** Validate a proposed document (used when a builder hands over a full draft). */
+/** Errors for protected governance surfaces missing from a document. */
+export function missingProtectedNodeErrors(document: UiDocument): string[] {
+  return missingProtectedNodes(document).map(
+    (id) => `node "${id}" is a protected governance surface and must be present`,
+  );
+}
+
+/**
+ * Validate a proposed or stored document (validator + anchor drift + the
+ * protected-surface invariant, so no deployable document can omit
+ * review-table, approval-list, or ui-builder).
+ */
 export function checkUiDocument(document: UiDocument): string[] {
-  return [...validateDocument(document), ...anchorDriftErrors(document)];
+  return [
+    ...validateDocument(document),
+    ...anchorDriftErrors(document),
+    ...missingProtectedNodeErrors(document),
+  ];
 }
 
 /** Read a draft patch from the `?ui_patch=<urlencoded JSON>` query, if present. */

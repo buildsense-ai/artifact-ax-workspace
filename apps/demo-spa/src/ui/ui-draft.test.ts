@@ -76,6 +76,9 @@ describe('demo-spa · UI-document draft/patch boundary (draft-only)', () => {
     // The shipped document retains every protected surface.
     expect(PROTECTED_NODE_IDS).toEqual(['review-table', 'approval-list', 'ui-builder']);
     expect(missingProtectedNodes(LESSON_REPORT_DOCUMENT)).toEqual([]);
+    // checkUiDocument itself enforces the invariant (single source of truth).
+    const stripped = { ...LESSON_REPORT_DOCUMENT, nodes: LESSON_REPORT_DOCUMENT.nodes.filter((node) => node.id !== 'ui-builder') };
+    expect(checkUiDocument(stripped)).toContain('node "ui-builder" is a protected governance surface and must be present');
     for (const id of PROTECTED_NODE_IDS) {
       const result = applyUiDocumentPatch(LESSON_REPORT_DOCUMENT, {
         contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,

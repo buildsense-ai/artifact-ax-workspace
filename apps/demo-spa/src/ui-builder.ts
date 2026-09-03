@@ -1,12 +1,13 @@
 import { TRIGGER_CONTRACT_VERSION, type ContextBundle } from '@artifact-ax/trigger';
 import {
+  isExecutableText,
   UI_DOCUMENT_CONTRACT_VERSION,
   UI_DOCUMENT_PATCH_CONTRACT_VERSION,
   type UiDocument,
   type UiDocumentPatch,
   type UiPrimitive,
 } from '@artifact-ax/ui-document';
-import { applyUiDocumentPatch, checkUiDocument, missingProtectedNodes } from './ui/ui-draft.js';
+import { applyUiDocumentPatch, checkUiDocument } from './ui/ui-draft.js';
 
 /**
  * The formal, standalone XiaoBa UI Builder path.
@@ -34,6 +35,14 @@ export const UI_ACTIVE_DOCUMENT_STORAGE_KEY = 'artifact-ax:lesson-report:ui-docu
 export const MAX_UI_PROPOSALS = 10;
 const MAX_UI_PATCH_OPS = 32;
 const MAX_UI_INTENT_LENGTH = 500;
+const MAX_STORED_SUMMARY_CHARS = 2_000;
+const MAX_STORED_MESSAGE_CHARS = 500;
+const MAX_STORED_TIMESTAMP_CHARS = 64;
+const MAX_STORED_PATCH_CHARS = 8_192;
+const INSERT_OP_KEYS = new Set(['op', 'index', 'node']);
+const UPDATE_OP_KEYS = new Set(['op', 'id', 'update']);
+const REMOVE_OP_KEYS = new Set(['op', 'id']);
+const UPDATE_FIELDS = new Set(['props', 'bindings', 'events']);
 
 /** A staged (or applied/discarded) UI-document patch proposal. */
 export interface UiProposalRecord {
@@ -202,6 +211,10 @@ export type UiPatchProposalValidation =
  */
 export function validateUiDocumentPatchProposal(payload: unknown, document: UiDocument): UiPatchProposalValidation {
   if (!isPlainRecord(payload)) return invalid('invalid_patch', 'patch proposal must be an object');
+  const envelopeKeys = new Set(['contract_version', 'document_id', 'base_revision', 'ops']);
+  if (Object.keys(payload).some((key) => !envelopeKeys.has(key))) {
+    return invalid('invalid_patch', 'patch proposal contains an unsupported field');
+  }
   if (payload.contract_version !== UI_DOCUMENT_PATCH_CONTRACT_VERSION) {
     return invalid('invalid_patch', `patch.contract_version must be ${UI_DOCUMENT_PATCH_CONTRACT_VERSION}`);
   }
@@ -221,8 +234,26 @@ export function validateUiDocumentPatchProposal(payload: unknown, document: UiDo
   // boundary (validatePatch + anchorDriftErrors, atomically, no mutation).
   const result = applyUiDocumentPatch(document, payload);
   if (!result.ok) return invalid(result.code, result.message);
-  const patch = payload as unknown as UiDocumentPatch;
+  // Never retain caller-owned references: clone the validated patch so later
+  // mutation of the delivered payload cannot change the record or apply behavior.
+  const patch = canonicalClone(payload) as unknown as UiDocumentPatch;
   return { ok: true, patch, summary: summarizeUiPatch(patch) };
+}
+
+/**
+ * Deep-clone a JSON-safe value with deterministically sorted object keys, so
+ * staged records and idempotency fingerprints are independent of the caller's
+ * object identity and property order.
+ */
+function canonicalClone(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalClone);
+  if (value !== null && typeof value === 'object') {
+    const source = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(source).sort()) out[key] = canonicalClone(source[key]);
+    return out;
+  }
+  return value;
 }
 
 /** A compact, human-readable one-line summary of the ops in a patch. */
@@ -308,11 +339,17 @@ export class UiProposalManager {
   stage(input: UiProposalStageInput): UiProposalStageResult {
     const checked = validateUiDocumentPatchProposal(input.payload, input.document);
     if (!checked.ok) return { ok: false, code: checked.code, message: checked.message };
-    const fingerprint = JSON.stringify(checked.patch);
+    // Work only with the validated, canonical clone from here on: the caller's
+    // payload object is never retained, so mutating it after staging cannot
+    // change the stored record, the fingerprint, or later apply behavior.
+    const patch = checked.patch;
+    const fingerprint = JSON.stringify(patch);
 
     const prior = this.proposals.find((proposal) => proposal.proposal_id === input.result_id);
     if (prior) {
-      if (JSON.stringify(prior.patch) !== fingerprint) {
+      // Compare canonical forms so property order or a tampered store cannot
+      // make an equivalent re-delivery look like a conflict (or vice versa).
+      if (JSON.stringify(canonicalClone(prior.patch)) !== fingerprint) {
         return { ok: false, code: 'idempotency_conflict', message: 'result id was already applied with a different patch proposal' };
       }
       this.receipts.set(input.result_id, fingerprint);
@@ -321,10 +358,10 @@ export class UiProposalManager {
 
     const record: UiProposalRecord = {
       proposal_id: input.result_id,
-      document_id: checked.patch.document_id,
-      base_revision: checked.patch.base_revision,
-      patch: checked.patch,
-      op_count: checked.patch.ops.length,
+      document_id: patch.document_id,
+      base_revision: patch.base_revision,
+      patch,
+      op_count: patch.ops.length,
       summary: checked.summary,
       state: 'staged',
       created_at: new Date().toISOString(),
@@ -464,10 +501,10 @@ export function loadActiveDocument(storage: Storage | undefined, storageKey: str
     const parsed: unknown = JSON.parse(raw);
     if (!isPlainRecord(parsed)) return fallback;
     // It must be a lesson-report document (same id/contract) that stays in-anchor
-    // and still carries every protected governance surface.
+    // and still carries every protected governance surface (enforced inside
+    // checkUiDocument, so the invariant has exactly one source of truth).
     if (parsed.id !== fallback.id || parsed.contract_version !== UI_DOCUMENT_CONTRACT_VERSION) return fallback;
     if (checkUiDocument(parsed as unknown as UiDocument).length > 0) return fallback;
-    if (missingProtectedNodes(parsed as unknown as UiDocument).length > 0) return fallback;
     return parsed as unknown as UiDocument;
   } catch {
     return fallback;
@@ -535,12 +572,66 @@ function isStoredProposal(value: unknown): value is UiProposalRecord {
     if (typeof value.proposal_id !== 'string' || value.proposal_id.length === 0 || value.proposal_id.length > 128) return false;
     if (typeof value.document_id !== 'string' || value.document_id.length === 0 || value.document_id.length > 64) return false;
     if (typeof value.base_revision !== 'number' || !Number.isInteger(value.base_revision) || value.base_revision < 0) return false;
-    if (!isPlainRecord(value.patch)) return false;
+    if (!isValidStoredPatch(value.patch)) return false;
+    const ops = (value.patch as { ops: unknown[] }).ops;
+    if (typeof value.op_count !== 'number' || !Number.isInteger(value.op_count) || value.op_count !== ops.length) return false;
+    if (typeof value.summary !== 'string' || value.summary.length === 0 || value.summary.length > MAX_STORED_SUMMARY_CHARS) return false;
+    if (isExecutableText(value.summary)) return false;
     if (value.state !== 'staged' && value.state !== 'applied' && value.state !== 'discarded' && value.state !== 'stale') return false;
+    if (typeof value.created_at !== 'string' || value.created_at.length === 0 || value.created_at.length > MAX_STORED_TIMESTAMP_CHARS) return false;
+    if (value.applied_revision !== undefined && (typeof value.applied_revision !== 'number' || !Number.isInteger(value.applied_revision) || value.applied_revision < 0)) return false;
+    for (const key of ['applied_at', 'discarded_at'] as const) {
+      const stamp = value[key];
+      if (stamp !== undefined && (typeof stamp !== 'string' || stamp.length === 0 || stamp.length > MAX_STORED_TIMESTAMP_CHARS)) return false;
+    }
+    if (value.error !== undefined) {
+      if (typeof value.error !== 'string' || value.error.length === 0 || value.error.length > MAX_STORED_MESSAGE_CHARS) return false;
+      if (isExecutableText(value.error)) return false;
+    }
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Structural/contract validation for a stored `UiDocumentPatch`: known
+ * envelope fields only, the exact patch contract version, and a bounded ops
+ * array whose members have a valid discriminant and field shapes. Deep
+ * catalog/anchor/stale validation stays at apply time against the
+ * then-current document (a stored patch is never trusted on its own).
+ */
+function isValidStoredPatch(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  const envelopeKeys = new Set(['contract_version', 'document_id', 'base_revision', 'ops']);
+  if (Object.keys(value).some((key) => !envelopeKeys.has(key))) return false;
+  if (value.contract_version !== UI_DOCUMENT_PATCH_CONTRACT_VERSION) return false;
+  if (typeof value.document_id !== 'string' || value.document_id.length === 0 || value.document_id.length > 64) return false;
+  if (typeof value.base_revision !== 'number' || !Number.isInteger(value.base_revision) || value.base_revision < 0) return false;
+  if (!Array.isArray(value.ops) || value.ops.length === 0 || value.ops.length > MAX_UI_PATCH_OPS) return false;
+  for (const op of value.ops) {
+    if (!isPlainRecord(op)) return false;
+    if (op.op === 'insert') {
+      if (Object.keys(op).some((key) => !INSERT_OP_KEYS.has(key))) return false;
+      if (typeof op.index !== 'number' || !Number.isInteger(op.index) || op.index < 0) return false;
+      if (!isPlainRecord(op.node)) return false;
+      if (typeof op.node.id !== 'string' || op.node.id.length === 0) return false;
+      if (typeof op.node.kind !== 'string' || op.node.kind.length === 0) return false;
+    } else if (op.op === 'update') {
+      if (Object.keys(op).some((key) => !UPDATE_OP_KEYS.has(key))) return false;
+      if (typeof op.id !== 'string' || op.id.length === 0) return false;
+      if (!isPlainRecord(op.update)) return false;
+      const fields = Object.keys(op.update);
+      if (fields.length === 0 || fields.some((key) => !UPDATE_FIELDS.has(key))) return false;
+      if (fields.some((key) => !isPlainRecord((op.update as Record<string, unknown>)[key]))) return false;
+    } else if (op.op === 'remove') {
+      if (Object.keys(op).some((key) => !REMOVE_OP_KEYS.has(key))) return false;
+      if (typeof op.id !== 'string' || op.id.length === 0) return false;
+    } else {
+      return false;
+    }
+  }
+  return JSON.stringify(value).length <= MAX_STORED_PATCH_CHARS;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

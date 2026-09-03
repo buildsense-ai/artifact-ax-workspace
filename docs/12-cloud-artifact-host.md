@@ -94,7 +94,15 @@ revalidates against the then-current document and persists the updated active
 if either persistence step (document, or proposal metadata) fails, the
 operation fails with code `storage_failed` and a visible status message, the
 prior proposal state is restored, and no in-memory mutation is left; the
-document and proposal stores never silently diverge.
+document and proposal stores never silently diverge. Staging never retains the
+delivered payload object: the patch is canonicalized (deep-cloned with sorted
+keys) after validation, so idempotency fingerprints and stored records are
+independent of caller identity/property order, and an unknown patch envelope
+field is rejected. Reloaded proposals fail closed too: `loadUiProposals`
+validates the patch contract/envelope and op shapes, bounds the serialized
+patch, summary, error, and timestamp fields, and rejects executable or unknown
+content; full catalog/anchor/stale revalidation still happens at apply time
+against the then-current document.
 Result idempotency is sink-scoped so a result id cannot collide across the two
 sinks.
 

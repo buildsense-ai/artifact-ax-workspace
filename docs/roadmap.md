@@ -178,7 +178,7 @@ copy of the Skill's publisher, injected bridge, or Agent runtime.
 | Surface | Status |
 | --- | --- |
 | `@artifact-ax/contract`: v1/v2/v3 manifests, bounded result schemas, trust-separated Observation Packets, task statuses, result receipts | implemented + tested against the Skill's local smoke contracts |
-| `apps/demo-spa/public/artifact-manifest.json`: one v3 task intent linked to one real result sink | implemented + publisher manifest validator passes |
+| `apps/demo-spa/public/artifact-manifest.json`: two declared v3 task-to-sink mappings (`lesson-report.review-selection.v1` → `lesson-report.agent-notes.upsert.v1`, `lesson-report.compose-ui.v1` → `lesson-report.ui-document-patch.propose.v1`) | implemented + publisher manifest validator passes |
 | `window.catscoArtifact.getContext()`: synchronous, bounded semantic snapshot with stable focus anchors | implemented + app helper tests |
 | `window.catscoArtifact.applyResult()`: sink/payload/revision validation, result-id idempotency, localStorage persistence, durable `applied` boundary | implemented + app helper and browser checks |
 | `CloudHostOutbox`: explicit Host task request, activation-aware staging, task status mapping, no hidden fallback/retry | implemented + unit tested |
@@ -227,7 +227,7 @@ execution.
 | `ui-draft.ts` + `?ui_patch=`: draft-only (developer) patch application boundary | implemented + unit-tested |
 | `ui-builder` catalog surface: formal compose-ui Builder panel (intent input, request action, staged proposal summary, human apply/discard, status feedback) | implemented + rendered from the validated document, no hard-coded DOM |
 | Formal compose-ui task/sink: `lesson-report.compose-ui.v1` → `lesson-report.ui-document-patch.propose.v1` with a bounded payload (current document/config, app revision/identity, user intent) | implemented + manifest-validated + unit-tested |
-| Sink-scoped idempotency + transactional stage/apply/discard persistence + persisted active `UiDocument` (workspace/artifact-scoped, fail-closed reload) + protected governance surfaces (`review-table`/`approval-list`/`ui-builder` cannot be removed; code `protected_surface`) + no-Host behavior | implemented + unit-tested |
+| Sink-scoped idempotency (canonical fingerprints) + transactional stage/apply/discard persistence + persisted active `UiDocument` (workspace/artifact-scoped, fail-closed reload incl. stored-record bounds) + protected governance surfaces (`review-table`/`approval-list`/`ui-builder` cannot be removed; code `protected_surface`) + no-Host behavior | implemented + unit-tested |
 | Stable `data-region-id`/`data-node-id`/`data-artifact-id` anchors, projection + semantic command/event seams, Cloud Host/task/result sink behavior | preserved |
 | React + Vercel json-render + shadcn/Base UI catalog | **not used**: would require converting the framework-free SPA and re-implementing its DOM-coupled transport/bridge/Cloud Host wiring; an equally constrained catalog renderer is used instead (reason documented in README) |
 | Generic, extensible Artifact runtime or agent-controlled UI code | **out of scope**: the catalog is closed and props/bindings/events are allowlisted; no raw HTML/JS/CSS input is accepted |

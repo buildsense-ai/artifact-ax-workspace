@@ -184,6 +184,19 @@ describe('compose-ui · patch proposal validation (security boundary)', () => {
     expect(validateUiDocumentPatchProposal(validPatch({ ops: [] }), LESSON_REPORT_DOCUMENT).ok).toBe(false);
     expect(validateUiDocumentPatchProposal('not-an-object', LESSON_REPORT_DOCUMENT).ok).toBe(false);
   });
+
+  it('rejects a proposal carrying unknown envelope fields', () => {
+    const smuggled = {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: LESSON_REPORT_DOCUMENT.revision,
+      ops: [{ op: 'remove', id: 'event-log' }],
+      authority: 'grant-me',
+    };
+    const result = validateUiDocumentPatchProposal(smuggled, LESSON_REPORT_DOCUMENT);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('invalid_patch');
+  });
 });
 
 describe('compose-ui · task payload builder (minimal, final-state-first)', () => {
@@ -507,6 +520,51 @@ describe('compose-ui · UiProposalManager stage/apply/discard + sink-scoped idem
     if (retried.ok) expect(retried.code).toBe('discarded');
     expect(mgr.current()).toBeNull();
   });
+
+  it('never retains caller-owned payload references when staging', () => {
+    const mgr = manager();
+    const resultId = 'arr_'.concat('T'.repeat(43));
+    const payload = validPatch();
+    const stage = mgr.stage({ result_id: resultId, payload, document: LESSON_REPORT_DOCUMENT });
+    expect(stage.ok).toBe(true);
+    // Mutate the caller's object after staging: change a prop and add an op.
+    const first = payload.ops[0] as { update: { props: Record<string, string> } };
+    first.update.props.emptyText = 'MUTATED BY CALLER';
+    payload.ops.push({ op: 'remove', id: 'event-log' });
+    // The staged record still holds the validated, canonical patch...
+    expect(mgr.current()?.op_count).toBe(1);
+    expect(JSON.stringify(mgr.current()?.patch)).not.toContain('MUTATED BY CALLER');
+    expect(mgr.current()?.patch.ops).toHaveLength(1);
+    // ...and apply behavior uses the validated patch, not the mutated payload.
+    const applied = mgr.apply(LESSON_REPORT_DOCUMENT);
+    expect(applied.ok).toBe(true);
+    if (applied.ok) {
+      const reviewTable = applied.document.nodes.find((node) => node.id === 'review-table');
+      expect((reviewTable?.props as Record<string, string>).emptyText).toBe('No rows.');
+    }
+  });
+
+  it('fingerprints canonically: reordered re-delivery is idempotent, a different valid patch conflicts', () => {
+    const mgr = manager();
+    const resultId = 'arr_'.concat('V'.repeat(43));
+    const stage = mgr.stage({ result_id: resultId, payload: validPatch(), document: LESSON_REPORT_DOCUMENT });
+    expect(stage.ok).toBe(true);
+    // Same content, different property order and nesting order.
+    const reordered = {
+      ops: [{ update: { props: { emptyText: 'No rows.', regionTitle: 'Review table', regionId: 'review-table' } }, id: 'review-table', op: 'update' }],
+      base_revision: LESSON_REPORT_DOCUMENT.revision,
+      document_id: 'lesson-report.v1',
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+    };
+    const replay = mgr.stage({ result_id: resultId, payload: reordered, document: LESSON_REPORT_DOCUMENT });
+    expect(replay.ok).toBe(true);
+    if (replay.ok) expect(replay.record.proposal_id).toBe(resultId);
+    // A different but fully valid patch for the same result id conflicts.
+    const different = validPatch({ ops: [{ op: 'update', id: 'review-table', update: { props: { regionId: 'review-table', regionTitle: 'Review table', emptyText: 'Changed.' } } }] });
+    const conflict = mgr.stage({ result_id: resultId, payload: different, document: LESSON_REPORT_DOCUMENT });
+    expect(conflict.ok).toBe(false);
+    if (!conflict.ok) expect(conflict.code).toBe('idempotency_conflict');
+  });
 });
 
 describe('compose-ui · no-Host behavior', () => {
@@ -527,5 +585,70 @@ describe('compose-ui · no-Host behavior', () => {
     expect(receipt.ok).toBe(false);
     expect(receipt.task_status).toBe('unavailable');
     expect(receipt.code).toBe('host_unavailable');
+  });
+});
+
+describe('compose-ui · persisted proposal reload fails closed', () => {
+  const key = uiProposalStorageKey('ws_demo', 'lesson-report');
+  const record = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    proposal_id: 'arr_'.concat('U'.repeat(43)),
+    document_id: 'lesson-report.v1',
+    base_revision: LESSON_REPORT_DOCUMENT.revision,
+    patch: validPatch(),
+    op_count: 1,
+    summary: '1 op: update review-table',
+    state: 'staged',
+    created_at: '2026-09-03T00:00:00.000Z',
+    ...over,
+  });
+  const patchWithRawOps = (ops: unknown[]): UiDocumentPatch => ({ ...validPatch(), ops: ops as UiDocumentPatch['ops'] });
+  const stored = (records: unknown[]): Storage => mockStorage({ [key]: JSON.stringify(records) });
+  const rejects = (label: string, over: Record<string, unknown>): void => {
+    expect(loadUiProposals(stored([record(over)]), key), label).toEqual([]);
+  };
+
+  it('accepts a well-formed stored record', () => {
+    expect(loadUiProposals(stored([record()]), key)).toHaveLength(1);
+  });
+
+  it('rejects malformed, oversized, executable, or contract-breaking stored records', () => {
+    rejects('unknown record field', { sneaky: true });
+    rejects('non-integer base_revision', { base_revision: 1.5 });
+    rejects('op_count mismatch', { op_count: 2 });
+    rejects('oversized summary', { summary: 'x'.repeat(2001) });
+    rejects('executable summary', { summary: 'no <script>alert(1)</script> please' });
+    rejects('executable error', { error: 'onerror= alert(1)' });
+    rejects('oversized created_at', { created_at: 'x'.repeat(65) });
+    rejects('negative applied_revision', { applied_revision: -1 });
+    rejects('wrong patch contract version', { patch: { ...validPatch(), contract_version: 'nope' } });
+    rejects('unknown patch envelope field', { patch: { ...validPatch(), authority: 'grant' } });
+    rejects('empty patch ops', { patch: { ...validPatch({ ops: [] }) } });
+    rejects('too many patch ops', { patch: patchWithRawOps(Array.from({ length: 33 }, () => ({ op: 'remove', id: 'event-log' }))) });
+    rejects('unknown op discriminant', { patch: patchWithRawOps([{ op: 'publish', id: 'review-table' }]) });
+    rejects('unknown update field', { patch: patchWithRawOps([{ op: 'update', id: 'review-table', update: { props: {}, bindings: {}, evil: {} } }]) });
+    rejects('non-object update field value', { patch: patchWithRawOps([{ op: 'update', id: 'review-table', update: { props: 'x' } }]) });
+    rejects('serialized patch over the byte bound', {
+      patch: patchWithRawOps([{ op: 'update', id: 'review-table', update: { props: { regionId: 'review-table', regionTitle: 'Review table', emptyText: 'x'.repeat(9000) } } }]),
+    });
+  });
+
+  it('still revalidates a loaded proposal against the then-current document at apply', () => {
+    const proposalKey = uiProposalStorageKey('ws_demo', 'lesson-report');
+    const docKey = activeDocumentStorageKey('ws_demo', 'lesson-report');
+    const storage = stored([record()]);
+    const mgr = new UiProposalManager({
+      storage,
+      storageKey: proposalKey,
+      documentStorageKey: docKey,
+      initial: loadUiProposals(storage, proposalKey),
+    });
+    expect(mgr.current()?.state).toBe('staged');
+    const moved = applyUiDocumentPatch(LESSON_REPORT_DOCUMENT, validPatch({ ops: [{ op: 'remove', id: 'event-log' }] }));
+    expect(moved.ok).toBe(true);
+    if (!moved.ok) return;
+    const result = mgr.apply(moved.document);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('invalid_patch');
+    expect(mgr.current()?.state).toBe('stale');
   });
 });
