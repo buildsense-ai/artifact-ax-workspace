@@ -161,10 +161,15 @@ SPA.
   of the existing ContextBundle. The sink accepts only a summary plus known
   row IDs and recommendations.
 - The page exposes `window.catscoArtifact.getContext()` as a synchronous,
-  read-only semantic snapshot. It contains stable selections, the current
-  report revision, visible rows, filters, and prior Agent notes; it never
-  contains credentials, prompts, opaque refs, or authority claims. The bridge
-  treats this object as untrusted observation data.
+  read-only **final-state-first** semantic snapshot: the latest final
+  projection/result summary plus stable refs only (`semantic_mode: 'final-state'`,
+  `state_revision`, `summary`, `filter`, `visible_rows`, `agent_notes`, stable
+  selection/node refs). It never contains credentials, prompts, opaque refs, or
+  authority claims. Intermediate event/state history is **never injected** into
+  the default context or the task payload and is **never required**; it is
+  retained only for a bounded optional query
+  (`getContext({ include_events: true, max_events: N })`) and is capped by the
+  page. The bridge treats this object as untrusted observation data.
 - The page exposes `window.catscoArtifact.applyResult()`. It validates the
   declared sink and payload again, checks the expected report revision,
   deduplicates by `result_id`, persists notes in the app's localStorage store,
@@ -277,6 +282,13 @@ is unchanged. Stable `data-region-id`/`data-node-id` anchors and the
   production manifest, the XiaoBa task/result contract, or any cats-company
   surface. `docs/13`, `artifact-manifest.json`, and the lesson-report Skill
   contract are **unchanged** — the formal task/result writer stays as-is.
+- **Final-state-first Agent context.** The default `getContext()` (and the
+  Cloud task payload emitted by `CloudHostOutbox`) is the latest final
+  projection/result summary plus stable refs only. Intermediate event/state
+  history is retained for a bounded optional query
+  (`getContext({ include_events: true })`), never automatically injected and
+  never required. This is stated in the lesson-report Skill contract and the
+  SPA `buildSemanticContext`.
 - **No generic runtime or agent-controlled code execution.** The document cannot
   emit raw HTML/JS/CSS, access browser secrets, or bypass command/permission
   policy.

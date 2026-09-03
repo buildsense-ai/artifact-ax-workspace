@@ -11,7 +11,7 @@ import {
 } from './cloud-surface.js';
 
 describe('demo cloud surface helpers', () => {
-  it('keeps semantic context bounded to stable application anchors', () => {
+  it('keeps semantic context final-state-first with stable application anchors', () => {
     const context = buildSemanticContext({
       revision: 3,
       table: { rows: [{ id: 'r-1', student: 'A', topic: 'Linear', status: 'pending' }], filter: { status: 'pending' } },
@@ -29,11 +29,43 @@ describe('demo cloud surface helpers', () => {
     });
     expect(context).toMatchObject({
       view: 'lesson-report',
+      semantic_mode: 'final-state',
       state_revision: '3',
       selected_rows: ['r-1'],
+      summary: { total: 1, pending: 1, approved: 0, rejected: 0 },
       dirty: false,
     });
+    // Final-state-first: no intermediate event/state history by default.
+    expect('events' in context).toBe(false);
     expect(CLOUD_RESULT_SINK_ID).toBe('lesson-report.agent-notes.upsert.v1');
+  });
+
+  it('never injects intermediate event history by default; exposes it only as bounded, explicit opt-in', () => {
+    const base = {
+      revision: 2,
+      table: { rows: [{ id: 'r-1', student: 'A', topic: 'Linear', status: 'pending' as const }], filter: { status: 'pending' as const } },
+      visibleRows: [{ id: 'r-1', student: 'A', topic: 'Linear', status: 'pending' as const }],
+      selections: [],
+      notes: [],
+    };
+    const events = Array.from({ length: 20 }, (_, index) => ({
+      seq: index + 1,
+      type: 'capability.executed',
+      actor_id: 'agent_440',
+      summary: `event ${index + 1}`,
+    }));
+    const defaultContext = buildSemanticContext(base);
+    expect('events' in defaultContext).toBe(false);
+
+    const withEvents = buildSemanticContext({ ...base, includeEvents: true, events });
+    expect(Array.isArray(withEvents.events)).toBe(true);
+    expect((withEvents.events as unknown[]).length).toBeLessThanOrEqual(5);
+    // Even when history is requested, the payload stays final-state-first.
+    expect(withEvents.semantic_mode).toBe('final-state');
+    expect(withEvents.state_revision).toBe('2');
+
+    const bounded = buildSemanticContext({ ...base, includeEvents: true, events, maxEvents: 3 });
+    expect((bounded.events as unknown[]).length).toBeLessThanOrEqual(3);
   });
 
   it('keeps a large page-authored snapshot below the bridge semantic limit', () => {

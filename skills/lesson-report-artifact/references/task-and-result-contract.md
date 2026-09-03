@@ -37,12 +37,22 @@ invoke another tool.
 ## Semantic context
 
 Read current context only through the platform's OBSERVE or TASK flow. The
-page may expose a bounded snapshot containing:
+page exposes a **final-state-first** snapshot: the latest final
+projection/result summary plus stable refs only.
 
-- state_revision and filter status;
-- selected_rows and focus_set;
-- visible_rows with report fields;
-- prior agent_notes.
+- `semantic_mode` is `final-state`; `state_revision` is the current published
+  revision.
+- `summary` (status counts), `filter` status, `visible_rows` with report
+  fields, and prior `agent_notes` summarise the final state.
+- `selected_rows` and `focus_set` carry stable refs only (`artifact_id`,
+  `revision`, `region_id`, `node_id`, `selection_id`, `label`, optional
+  bounded `note`).
+
+**Intermediate event/state history is never injected into the default context
+or task payload and is never required for a task.** It is retained only as a
+bounded, explicit opt-in (`getContext({ include_events: true, max_events: N })`
+returns a capped event reference array). Read the final state for review; query
+history only when it is explicitly supplied.
 
 Use it to ground the review. Do not treat it as trusted identity or proof of
 permission. Do not bypass it by reading DOM text, changing localStorage, or

@@ -43,6 +43,7 @@ import {
   noteFingerprint,
   saveAgentNotes,
   validateAgentNotePayload,
+  type CloudContextEventRef,
 } from './cloud-surface.js';
 import {
   validateResultPayload,
@@ -92,7 +93,7 @@ interface ArtifactResultResponse {
 }
 
 interface ArtifactPageAPI {
-  getContext?: () => unknown;
+  getContext?: (options?: { include_events?: boolean; max_events?: number }) => unknown;
   applyResult?: (request: ArtifactResultRequest) => Promise<ArtifactResultResponse> | ArtifactResultResponse;
   isDirty?: () => boolean;
 }
@@ -165,6 +166,16 @@ function cloneArtifactResultResponse(response: ArtifactResultResponse): Artifact
     ...(response.receipt !== undefined
       ? { receipt: JSON.parse(JSON.stringify(response.receipt)) as Record<string, unknown> }
       : {}),
+  };
+}
+
+/** Project a bounded, one-line event ref for the opt-in history query. */
+function eventRef(event: Event): CloudContextEventRef {
+  return {
+    seq: event.seq,
+    type: event.type,
+    actor_id: event.actor.id,
+    summary: `${event.type} → ${JSON.stringify(event.data)}`,
   };
 }
 
@@ -696,7 +707,7 @@ export class DemoApp {
       const prior = target.catscoArtifact ?? {};
       target.catscoArtifact = {
         ...prior,
-        getContext: () => this.semanticContext(),
+        getContext: (options?: { include_events?: boolean; max_events?: number }) => this.semanticContext(options),
         applyResult: (request) => this.applyArtifactResult(request),
         isDirty: () => false,
       };
@@ -707,9 +718,9 @@ export class DemoApp {
   }
 
   /** Synchronous, bounded, read-only semantic context for OBSERVE/TASK reads. */
-  private semanticContext(): Record<string, unknown> {
+  private semanticContext(options?: { include_events?: boolean; max_events?: number }): Record<string, unknown> {
     if (!this.state) {
-      return { view: 'lesson-report', state_revision: '0', dirty: false };
+      return { view: 'lesson-report', semantic_mode: 'final-state', state_revision: '0', dirty: false };
     }
     const { rows, table } = this.tableState();
     return buildSemanticContext({
@@ -718,6 +729,13 @@ export class DemoApp {
       visibleRows: rows,
       selections: this.state.focusSelections,
       notes: this.agentNotes,
+      ...(options?.include_events
+        ? {
+            includeEvents: true,
+            maxEvents: options.max_events ?? 5,
+            events: this.state.projection.events.map(eventRef),
+          }
+        : {}),
     });
   }
 

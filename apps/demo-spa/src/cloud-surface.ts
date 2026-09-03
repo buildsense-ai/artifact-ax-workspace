@@ -1,4 +1,5 @@
 import type { ReviewRow, ReviewTableState } from '@artifact-ax/lesson-report';
+import { summarize } from '@artifact-ax/lesson-report';
 import type { Selection } from '@artifact-ax/trigger';
 
 /**
@@ -46,8 +47,10 @@ const MAX_CONTEXT_SELECTIONS = 20;
 const MAX_VISIBLE_ROWS = 12;
 const MAX_NOTES = 20;
 const MAX_CONTEXT_NOTES = 5;
+const MAX_CONTEXT_EVENTS = 5;
 const MAX_SUMMARY_LENGTH = 2_000;
 const MAX_RECOMMENDATION_LENGTH = 500;
+const MAX_EVENT_SUMMARY_LENGTH = 200;
 const MAX_ROW_ID_LENGTH = 64;
 const RESULT_ID_PATTERN = /^arr_[A-Za-z0-9_-]{43}$/;
 
@@ -66,12 +69,24 @@ export interface AgentNotePayload {
   recommendations?: string[];
 }
 
+/** A bounded, one-line reference to an intermediate event (opt-in only). */
+export interface CloudContextEventRef {
+  seq: number;
+  type: string;
+  actor_id: string;
+  summary: string;
+}
+
 export interface CloudContextInput {
   revision: number;
   table: ReviewTableState;
   visibleRows: readonly ReviewRow[];
   selections: readonly Selection[];
   notes: readonly AgentNoteRecord[];
+  /** Bounded optional intermediate event history. Never included by default. */
+  events?: readonly CloudContextEventRef[];
+  includeEvents?: boolean;
+  maxEvents?: number;
 }
 
 export type PayloadValidation =
@@ -79,9 +94,17 @@ export type PayloadValidation =
   | { ok: false; code: string; message: string };
 
 /**
- * Build the optional page-authored semantic snapshot.  It contains bounded
- * business state only; identity, permissions, credentials, and transport
- * references deliberately stay outside this object.
+ * Build the final-state-first page-authored semantic snapshot.
+ *
+ * The default payload is the latest final projection/result summary plus
+ * stable refs only (`state_revision`, `summary`, `filter`, `visible_rows`,
+ * `agent_notes`, and the stable selection/node refs). It deliberately contains
+ * no intermediate event/state history. Intermediate events are retained and
+ * exposed only through an explicit, bounded opt-in (`includeEvents` + bound
+ * `events`), never automatically injected and never required for a task.
+ *
+ * Identity, permissions, credentials, and transport references officially stay
+ * outside this object.
  */
 export function buildSemanticContext(input: CloudContextInput): Record<string, unknown> {
   const selections = input.selections.slice(0, MAX_CONTEXT_SELECTIONS).map((selection) => ({
@@ -112,7 +135,10 @@ export function buildSemanticContext(input: CloudContextInput): Record<string, u
   }));
   const context: Record<string, unknown> = {
     view: 'lesson-report',
+    // Mark the payload as final-state-first: latest final summary + stable refs.
+    semantic_mode: 'final-state',
     state_revision: String(input.revision),
+    summary: summarize(input.table),
     filter: { status: input.table.filter.status ?? 'all' },
     selected_rows: selectedRows,
     focus_set: selections,
@@ -122,8 +148,21 @@ export function buildSemanticContext(input: CloudContextInput): Record<string, u
     // data.  Do not make every click or filter change look like a dirty draft.
     dirty: false,
   };
-  // The official bridge accepts at most 8 KiB of semantic state. Keep a
-  // little headroom so its sanitizer does not discard the whole snapshot.
+  // Optional, bounded event/state history: only when explicitly requested.
+  if (input.includeEvents === true) {
+    const eventRefs = (input.events ?? []).slice(-(input.maxEvents ?? MAX_CONTEXT_EVENTS)).map((event) => ({
+      seq: event.seq,
+      type: event.type,
+      actor_id: event.actor_id,
+      summary: limitText(event.summary, MAX_EVENT_SUMMARY_LENGTH),
+    }));
+    if (eventRefs.length > 0) context.events = eventRefs;
+  }
+  // The official bridge accepts at most 8 KiB of semantic state. Optional
+  // history is dropped first; then the final-state summary is trimmed.
+  if (utf8Bytes(context) > 7_500) {
+    delete context.events;
+  }
   if (utf8Bytes(context) > 7_500) {
     context.visible_rows = visibleRows.slice(0, 6);
     context.agent_notes = notes.slice(-2);

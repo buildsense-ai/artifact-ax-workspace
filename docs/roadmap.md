@@ -188,8 +188,10 @@ copy of the Skill's publisher, injected bridge, or Agent runtime.
 
 - The immutable manifest is version-level metadata. It contains no current
   rows, selections, prompts, credentials, or permission claims.
-- Page-authored context is observation data. Trusted Artifact identity and
-  lifecycle fields remain outside `getContext()`.
+- Page-authored context is **final-state-first** observation data: the latest
+  final projection/result summary plus stable refs only. Trusted Artifact
+  identity and lifecycle fields remain outside `getContext()`; intermediate
+  event/state history is bounded optional only and is never injected.
 - A task is requested only from the explicit Focus Set action. Collected,
   suggested, confirmation-gated, deferred, disconnected, and activation-
   rejected states remain visible local receipts; they do not create a hidden
@@ -232,6 +234,11 @@ execution.
 
 - The document is version-level UI metadata (V1); it carries no rows,
   selections, prompts, credentials, or permission claims.
+- The Agent-facing context/task payload is **final-state-first**: latest final
+  projection/result summary plus stable refs only. Intermediate event/state
+  history is retained for a bounded optional query
+  (`getContext({ include_events: true })`), never automatically injected and
+  never required.
 - A builder patch is applied only after the same catalog allowlist validation;
   invalid patches are rejected and never touch application state.
 - The renderer uses `textContent` for all dynamic text; it never emits untrusted
