@@ -47,14 +47,22 @@ function validateOpShape(op: unknown): string[] {
   }
   if (discriminant === 'update') {
     if (typeof op.id !== 'string' || op.id === '') return ['update op requires a non-empty node id'];
-    if (op.update !== undefined) {
-      if (!isPlainObject(op.update)) return ['update op.update must be an object'];
-      for (const field of ['props', 'bindings', 'events'] as const) {
-        if (op.update[field] !== undefined && !isPlainObject(op.update[field])) {
-          return [`update op.update.${field} must be an object`];
-        }
+    if (!isPlainObject(op.update)) return ['update op requires an update object'];
+    const allowedFields = new Set(['props', 'bindings', 'events']);
+    const keys = Object.keys(op.update);
+    for (const key of keys) {
+      if (!allowedFields.has(key)) return [`update op.update contains an unknown field "${key}"`];
+    }
+    if (keys.length === 0) return ['update op.update is empty; provide at least one of props/bindings/events'];
+    let hasChange = false;
+    for (const field of ['props', 'bindings', 'events'] as const) {
+      const value = op.update[field];
+      if (value !== undefined) {
+        if (!isPlainObject(value)) return [`update op.update.${field} must be an object`];
+        if (Object.keys(value).length > 0) hasChange = true;
       }
     }
+    if (!hasChange) return ['update op must change at least one of props/bindings/events; no-op updates are rejected'];
     return [];
   }
   if (typeof op.id !== 'string' || op.id === '') return ['remove op requires a non-empty node id'];

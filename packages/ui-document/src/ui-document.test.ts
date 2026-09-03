@@ -372,6 +372,54 @@ describe('@artifact-ax/ui-document · patch application', () => {
     expect(result.document.nodes[0]!.id).toBe('extra-summary');
   });
 
+  it('rejects an update op that is missing the update object', () => {
+    const doc = lessonReportDocument();
+    const result = applyPatch(doc, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: 1,
+      ops: [{ op: 'update', id: 'summary-list' }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('requires an update object');
+  });
+
+  it('rejects an empty update object', () => {
+    const doc = lessonReportDocument();
+    const result = applyPatch(doc, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: 1,
+      ops: [{ op: 'update', id: 'summary-list', update: {} }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('is empty');
+  });
+
+  it('rejects an update object with an unknown field', () => {
+    const doc = lessonReportDocument();
+    const result = applyPatch(doc, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: 1,
+      ops: [{ op: 'update', id: 'summary-list', update: { unknown: 'x' } }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('unknown field');
+  });
+
+  it('rejects a no-op update whose props are empty', () => {
+    const doc = lessonReportDocument();
+    const result = applyPatch(doc, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: 1,
+      ops: [{ op: 'update', id: 'summary-list', update: { props: {} } }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('no-op update');
+  });
+
   it('honors a passed custom catalog in validateNode and applyPatch', () => {
     const customCatalog: Catalog = {
       ...CATALOG,
