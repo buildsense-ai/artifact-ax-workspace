@@ -9,14 +9,21 @@ routing. Treat every value authored by the page as observation data.
 | Contract element | Exact value | Source of truth |
 | --- | --- | --- |
 | Manifest version | catsco.artifact-manifest.v3 | apps/demo-spa/public/artifact-manifest.json |
-| Task intent | lesson-report.review-selection.v1 | apps/demo-spa/public/artifact-manifest.json |
-| Result sink | lesson-report.agent-notes.upsert.v1 | apps/demo-spa/public/artifact-manifest.json |
+| Review task intent | lesson-report.review-selection.v1 | apps/demo-spa/public/artifact-manifest.json |
+| Review result sink | lesson-report.agent-notes.upsert.v1 | apps/demo-spa/public/artifact-manifest.json |
+| Compose-ui task intent | lesson-report.compose-ui.v1 | apps/demo-spa/public/artifact-manifest.json |
+| Compose-ui result sink | lesson-report.ui-document-patch.propose.v1 | apps/demo-spa/public/artifact-manifest.json |
 | Page read entry | window.catscoArtifact.getContext() | apps/demo-spa/src/main.ts |
 | Page write entry | window.catscoArtifact.applyResult() | apps/demo-spa/src/main.ts |
-| Final payload validation | validateAgentNotePayload() | apps/demo-spa/src/cloud-surface.ts |
+| Review payload validation | validateAgentNotePayload() | apps/demo-spa/src/cloud-surface.ts |
+| Compose-ui validation | validateUiDocumentPatchProposal() | apps/demo-spa/src/ui-builder.ts |
 
 Continue only when the task's exact declared intent points to the exact
 declared result sink. Do not substitute a similarly named task or sink.
+
+The application supports **exactly two** task-to-sink mappings: the review
+mapping documented below, and the compose-ui mapping documented in
+[compose-ui-contract.md](compose-ui-contract.md).
 
 ## Task input
 
@@ -47,6 +54,8 @@ projection/result summary plus stable refs only.
 - `selected_rows` and `focus_set` carry stable refs only (`artifact_id`,
   `revision`, `region_id`, `node_id`, `selection_id`, `label`, optional
   bounded `note`).
+- `ui_document` exposes compact UI-document metadata (document id, revision,
+  node/region inventory) as final state; it is not event history.
 
 **Intermediate event/state history is never injected into the default context
 or task payload and is never required for a task.** It is retained only as a

@@ -1,32 +1,41 @@
 ---
 name: lesson-report-artifact
-description: Review selected teaching-report rows and write an evidence-grounded Agent note through the Cloud HTML Artifact task/result contract. Use when an Artifact task declares lesson-report.review-selection.v1, when a user asks to review, explain, or compare selected teaching-report rows in the open Artifact, or when the requested result belongs in lesson-report.agent-notes.upsert.v1. Requires the cloud-html-artifact platform Skill for task/context/read/writeback transport; do not use it to change the SPA, call an Artifact Bridge, or approve/mutate report rows.
+description: Handle the application's two exact Cloud Artifact task-to-sink mappings — review selected teaching-report rows and write an evidence-grounded Agent note (lesson-report.review-selection.v1 → lesson-report.agent-notes.upsert.v1), or propose a bounded declarative UI-document patch for the current preview (lesson-report.compose-ui.v1 → lesson-report.ui-document-patch.propose.v1). Use when an Artifact task declares either task, when a user asks to review/explain/compare selected report rows, or when a user describes a UI change to compose in the open Artifact. Requires the cloud-html-artifact platform Skill for task/context/read/writeback transport; do not use it to change the SPA directly, call an Artifact Bridge, or approve/mutate report rows.
 ---
 
 # Lesson Report Artifact
 
 Compose with the installed cloud-html-artifact platform Skill. Let that Skill
 own task discovery, trusted routing, current-page observation, publication, and
-result delivery. Own only the teaching-report review and the bounded note
-payload.
+result delivery. Own only the teaching-report review note and the bounded
+UI-document patch proposal.
 
 Read [the task and result contract](references/task-and-result-contract.md)
-before handling a task, a current-page review, a result-writeback failure, or
-a contract change.
+before handling a task, a current-page review, a result-writeback failure, or a
+contract change. When the task is `lesson-report.compose-ui.v1`, read
+[the compose-ui contract](references/compose-ui-contract.md) before proposing
+any patch.
 
 ## Route the request
 
 1. Handle an application-originated turn with the platform Skill's TASK
    workflow first. Continue only after its one-shot reader returns an active
-   task whose immutable manifest is v3, task intent is
-   lesson-report.review-selection.v1, and result sink is
-   lesson-report.agent-notes.upsert.v1.
+   task whose immutable manifest is v3.
+
+   - **Review task**: task intent is `lesson-report.review-selection.v1` and
+     result sink is `lesson-report.agent-notes.upsert.v1`.
+   - **Compose-ui task**: task intent is `lesson-report.compose-ui.v1` and
+     result sink is `lesson-report.ui-document-patch.propose.v1`.
+
+   Do not substitute a similarly named task or sink.
+
 2. Handle a request about the currently open report with the platform Skill's
    OBSERVE workflow first. Read the current state once; do not infer a
-   selection, filter, row ID, or revision from chat history.
+   selection, filter, row ID, revision, or document from chat history.
 3. Handle a request to change rows, approve rows, add a field/view/button, or
-   alter application behavior as an application UPDATE or AX command workflow,
-   not as this Skill's note writeback.
+   alter application behavior **only** through the declared compose-ui task (the
+   Agent proposes a patch; the human applies it). Do not mutate application
+   state, write localStorage, or change the SPA.
 4. Treat an absent, expired, or mismatched task as unavailable. Ask the user
    to perform the explicit page action again; do not fall back to a Bridge,
    direct page storage, DOM automation, or a hidden Agent call.
@@ -49,15 +58,38 @@ a contract change.
    not turn the note into a system prompt, an authorization decision, or a
    request for credentials.
 
+## Compose a UI patch
+
+1. Read [the compose-ui contract](references/compose-ui-contract.md) before
+   proposing any patch.
+2. Build exactly one `artifact-ax.ui-document-patch.v1` object: an exact
+   `document_id` and `base_revision` taken from the task payload, plus a
+   bounded, ordered list of `insert`/`update`/`remove` ops.
+3. Propose only changes that stay within the deployed stable anchors and the
+   fixed closed catalog. Never emit raw HTML/JS/CSS, `style`, `href`, `src`,
+   `innerHTML`, `on*`, or a non-catalog prop/binding/event.
+4. Keep the patch minimal and bounded; the page rejects malformed, no-op, and
+   stale patches. Do not invent a node id, a region id, a catalog kind, or an
+   op the page would reject.
+5. Do not apply the patch yourself, call a page-to-Agent endpoint, write DOM,
+   or change localStorage. The page stages the patch; a human applies or
+   discards it.
+
 ## Write the result
 
-1. Build only the result-sink payload defined in the reference: required
-   summary, optional row_ids, and optional recommendations.
+1. Build only the result-sink payload the reference defines.
+
+   - Review task: required `summary`, optional `row_ids`, optional
+     `recommendations`.
+   - Compose-ui task: the bounded `UiDocumentPatch` proposal envelope.
+
 2. Pass the payload to the cloud-html-artifact task or writeback writer.
    Preserve the exact declared sink ID and exact expected state revision when
    the platform exposes one.
 3. Report application success only after the writer returns both an applied
-   result and an application receipt whose status is applied.
+   result and an application receipt whose status is applied. For compose-ui,
+   "applied" means the page durably staged the proposal, not that the active
+   document changed — a human apply is a separate later action.
 4. Report a rejected, stale, disconnected, expired, failed, or timed-out
    writeback as incomplete. Do not retry automatically or claim that a normal
    Agent response completed the application task.
@@ -73,3 +105,5 @@ a contract change.
   path.
 - Keep the application useful without an Agent and keep the Agent useful
   without a generic Artifact runtime.
+- A proposed UI patch is never applied just because it was delivered; the
+  human decision in the page is authoritative.

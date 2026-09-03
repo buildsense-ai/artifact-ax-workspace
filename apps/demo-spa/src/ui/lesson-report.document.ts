@@ -145,6 +145,33 @@ export const LESSON_REPORT_DOCUMENT: UiDocument = {
         notes: 'agentNotes',
       },
     },
+    {
+      id: 'ui-builder',
+      kind: 'ui-builder',
+      placement: 'full',
+      props: {
+        regionId: 'ui-builder',
+        regionTitle: 'UI Builder',
+        hint: 'Describe a bounded UI change for the current preview. Only an explicit request sends the compose-ui task; a proposal is staged until a human applies or discards it.',
+      },
+      bindings: {
+        intent: 'uiBuilder.intent',
+        status: 'uiBuilder.status',
+        requestLabel: 'uiBuilder.requestLabel',
+        applyLabel: 'uiBuilder.applyLabel',
+        discardLabel: 'uiBuilder.discardLabel',
+        proposal: 'uiBuilder.proposal',
+        requestDisabled: 'uiBuilder.requestDisabled',
+        applyDisabled: 'uiBuilder.applyDisabled',
+        discardDisabled: 'uiBuilder.discardDisabled',
+      },
+      events: {
+        request: 'requestUiProposal',
+        apply: 'applyUiProposal',
+        discard: 'discardUiProposal',
+        intent: 'uiIntentInput',
+      },
+    },
   ],
 };
 

@@ -56,13 +56,39 @@ snapshot of current rows. It declares:
 | --- | --- | --- |
 | Task intent | `lesson-report.review-selection.v1` | Ask the owning Agent to review a bounded ContextBundle. |
 | Result sink | `lesson-report.agent-notes.upsert.v1` | Persist a summary and optional known row references as an Agent note. |
+| Task intent | `lesson-report.compose-ui.v1` | Ask the owning Agent to propose a bounded declarative UI-document patch. |
+| Result sink | `lesson-report.ui-document-patch.propose.v1` | Stage a bounded `UiDocumentPatch` proposal for the current preview; a human applies or discards it. |
 
-The manifest uses `catsco.artifact-manifest.v3` because the task intent points
-to a declared result sink. The task schema mirrors the default
+The manifest uses `catsco.artifact-manifest.v3` because each task intent points
+to a declared result sink. The review task schema mirrors the default
 `CloudHostOutbox` payload: bundle identity, revision, stable selection anchors,
-the user's intent text, and a compact assessment. It contains no prompt
-template, current records, credentials, opaque context reference, or permission
-claim.
+the user's intent text, and a compact assessment. The compose-ui task schema is
+bounded and minimal: the current final UI document/configuration (compact
+node/region inventory), the current application revision/identity, and the
+user's requested UI intent. Neither task contains a prompt template, current
+records, credentials, opaque context reference, or permission claim.
+
+### Composition task / UI builder
+
+The Builder panel is itself an approved `ui-builder` catalog surface rendered
+from the same validated declarative UI document. An explicit request action
+sends `lesson-report.compose-ui.v1` only through the injected Cloud Artifact
+Host port (a second `CloudHostOutbox` bound to that task intent); the page never
+invents a page-to-Agent endpoint, a Bridge, AG-UI, DOM automation, browser
+secret, or cats-company dependency. With no Host the button is disabled and the
+page says it will not dispatch a compose-ui task — standalone mode stays useful.
+
+The `lesson-report.ui-document-patch.propose.v1` sink accepts an untrusted
+`UiDocumentPatch` proposal. `applyResult()` validates its declared schema,
+document id, base revision, operation constraints, stable anchors, and closed
+catalog, rejecting raw code/HTML/JS/CSS and malformed/no-op/stale patches, then
+durably stages the proposal in the browser-local store before returning an
+`applied` receipt. The patch is **never** applied merely because it was
+delivered: a later human `Apply` revalidates against the then-current document
+and persists the active document (handling stale conflicts), and a human
+`Discard` removes the staged proposal. Result idempotency is sink-scoped so a
+result id cannot collide across the two sinks. Storage is browser-local unless
+a durable shared host is introduced; no collaboration persistence is assumed.
 
 The shared `@artifact-ax/contract` package validates v1/v2/v3 manifests,
 bounded JSON Schema, Observation Packets, task statuses, writeback targets, and
@@ -82,12 +108,14 @@ window.catscoArtifact = {
 ```
 
 `getContext()` returns the current report revision, filter, selected row IDs,
-Focus Set anchors and notes, a bounded visible-row sample, and previously
-applied Agent-note summaries. The implementation caps collections and strings
-and keeps headroom below the bridge's 8 KiB semantic limit. The snapshot is
-page-authored observation data; it cannot establish Artifact identity,
-authorization, or Agent instructions. Focus Set clicks are context, not dirty
-application data, so the page reports `dirty: false`.
+Focus Set anchors and notes, a bounded visible-row sample, previously applied
+Agent-note summaries, and compact UI-document metadata (`ui_document`). The
+implementation caps collections and strings and keeps headroom below the
+bridge's 8 KiB semantic limit. The snapshot is page-authored observation data;
+it cannot establish Artifact identity, authorization, or Agent instructions.
+Focus Set clicks and the Builder intent are context, not dirty application
+data, so the page reports `dirty: false`. Intermediate event/state history is
+never injected (final-state-first) and remains a bounded opt-in query.
 
 ## Controlled result writeback
 
@@ -115,6 +143,14 @@ The sink intentionally writes notes instead of directly approving rows. The
 existing `approve_rows` capability remains an AX command with its human
 approval gate, so the demo does not misrepresent `pending_approval` as a
 Cloud Artifact `applied` receipt.
+
+`applyResult()` routes on the declared sink. The second sink
+(`lesson-report.ui-document-patch.propose.v1`) never writes an Agent note; it
+validates a `UiDocumentPatch` proposal against the current document and durably
+stages it, returning `applied` only after the staged proposal is persisted. A
+human `Apply`/`Discard` in the Builder panel (not the Agent) decides whether the
+active document changes. This keeps a delivered Agent patch from ever becoming
+a live application mutation on its own.
 
 ## Host task lifecycle
 

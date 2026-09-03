@@ -1,6 +1,7 @@
 import type { ReviewRow, ReviewTableState } from '@artifact-ax/lesson-report';
 import { summarize } from '@artifact-ax/lesson-report';
 import type { Selection } from '@artifact-ax/trigger';
+import type { UiComposeDocumentMeta } from './ui-builder.js';
 
 /**
  * The two ids are application contracts, not Agent prompts.  They are kept
@@ -87,6 +88,8 @@ export interface CloudContextInput {
   events?: readonly CloudContextEventRef[];
   includeEvents?: boolean;
   maxEvents?: number;
+  /** Optional compact UI-document metadata exposed as final state (no history). */
+  documentMeta?: UiComposeDocumentMeta;
 }
 
 export type PayloadValidation =
@@ -148,6 +151,8 @@ export function buildSemanticContext(input: CloudContextInput): Record<string, u
     // data.  Do not make every click or filter change look like a dirty draft.
     dirty: false,
   };
+  // Expose compact UI-document metadata as final state (never event history).
+  if (input.documentMeta !== undefined) context.ui_document = input.documentMeta;
   // Optional, bounded event/state history: only when explicitly requested.
   if (input.includeEvents === true) {
     const eventCount = normalizeMaxEvents(input.maxEvents);

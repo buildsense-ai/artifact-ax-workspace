@@ -224,11 +224,14 @@ execution.
 | `@artifact-ax/ui-document`: `UiDocument` contract, fixed `CATALOG`, safe data-bindings, semantic event-bindings, validated patches; catalog/prop/binding/event allowlist enforcement + raw-executable-input rejection | implemented + tested |
 | `lesson-report.document.ts`: the declarative document for the report surfaces | implemented (validated at render time) |
 | `catalog-renderer.ts`: constrained catalog renderer that walks the document and renders each approved surface (bindings resolved, events dispatched to the gateway) | implemented + browser-verified |
-| `ui-draft.ts` + `?ui_patch=`: draft-only patch application boundary | implemented + unit-tested |
+| `ui-draft.ts` + `?ui_patch=`: draft-only (developer) patch application boundary | implemented + unit-tested |
+| `ui-builder` catalog surface: formal compose-ui Builder panel (intent input, request action, staged proposal summary, human apply/discard, status feedback) | implemented + rendered from the validated document, no hard-coded DOM |
+| Formal compose-ui task/sink: `lesson-report.compose-ui.v1` → `lesson-report.ui-document-patch.propose.v1` with a bounded payload (current document/config, app revision/identity, user intent) | implemented + manifest-validated + unit-tested |
+| Sink-scoped idempotency + staged-proposal stage/apply/discard/persistence + no-Host behavior | implemented + unit-tested |
 | Stable `data-region-id`/`data-node-id`/`data-artifact-id` anchors, projection + semantic command/event seams, Cloud Host/task/result sink behavior | preserved |
 | React + Vercel json-render + shadcn/Base UI catalog | **not used**: would require converting the framework-free SPA and re-implementing its DOM-coupled transport/bridge/Cloud Host wiring; an equally constrained catalog renderer is used instead (reason documented in README) |
 | Generic, extensible Artifact runtime or agent-controlled UI code | **out of scope**: the catalog is closed and props/bindings/events are allowlisted; no raw HTML/JS/CSS input is accepted |
-| Formal production manifest/task/result contract change | **not done**: the patch path is local draft-only; the production task/sink IDs and payload schema are unchanged (`artifact-manifest.json` untouched). The page `getContext`/OBSERVE context semantics are final-state-first and are documented in `docs/13` and the lesson-report Skill reference. |
+| Live XiaoBa Host round-trip for compose-ui | **not run**: the page contract and manifest are validated; a real CatsCo production Host round-trip is a follow-up (see Phase 0) |
 
 ### Carry-over rules
 
@@ -243,7 +246,11 @@ execution.
   (`getContext({ include_events: true })`), never automatically injected and
   never required.
 - A builder patch is applied only after the same catalog allowlist validation;
-  invalid patches are rejected and never touch application state.
+  invalid patches are rejected and never touch application state. A formal
+  compose-ui patch is validated and **staged only** by the page; a human applies
+  or discards it (never applied merely because it was delivered).
+- The page `getContext` may expose compact UI-document metadata (`ui_document`)
+  as final state; intermediate event/state history remains a bounded opt-in.
 - The renderer uses `textContent` for all dynamic text; it never emits untrusted
   text as HTML, never executes a document value, and cannot reach browser
   secrets or bypass command/permission policy.
@@ -255,8 +262,8 @@ The deployed Agent uses two installed Skills, with no standalone Bridge:
 | Surface | Status |
 | --- | --- |
 | Existing cloud-html-artifact platform Skill, version 1.4.0: one-shot task/context readers and declared result writer | external prerequisite; read-only local package inspected |
-| lesson-report-artifact domain Skill: review rules, exact task/sink routing, bounded note schema, applied-only completion rule | packaged + validated in this repository |
-| Generic artifact-ax runtime/transport Skill | deliberately deferred; there is only one concrete hosted task consumer |
+| lesson-report-artifact domain Skill: review rules + compose-ui patch rules, exact two task/sink routings, bounded note schema + UI patch schema, applied-only completion rule | packaged + validated in this repository |
+| Generic artifact-ax runtime/transport Skill | deliberately deferred; there are two concrete hosted task consumers (review + compose-ui) but both are thin mappings over the same platform transport |
 | Bridge, artifactctl context, AG-UI projection, and transitional bridge auth | developer-only harness; excluded from the XiaoBa path |
 | Direct XiaoBa/SkillHub import command | not claimed; target Bot identity, credentials, and import wire format remain operator-owned |
 

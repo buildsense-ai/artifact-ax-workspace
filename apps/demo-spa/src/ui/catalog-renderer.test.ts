@@ -20,7 +20,7 @@ describe('demo-spa · catalog renderer surface anchors', () => {
   it('covers every surface kind the renderer implements', () => {
     const kinds = LESSON_REPORT_DOCUMENT.nodes.map((node) => node.kind).sort();
     expect(kinds).toEqual(
-      ['agent-notes', 'approval-list', 'context-outbox', 'event-log', 'focus-composer', 'review-table', 'summary-list'].sort(),
+      ['agent-notes', 'approval-list', 'context-outbox', 'event-log', 'focus-composer', 'review-table', 'summary-list', 'ui-builder'].sort(),
     );
   });
 

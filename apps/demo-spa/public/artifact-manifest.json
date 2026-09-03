@@ -1,8 +1,8 @@
 {
   "contract_version": "catsco.artifact-manifest.v3",
-  "purpose": "Review teaching-report rows with a human or the owning Agent.",
-  "views": ["review-table", "summary-panel", "approval-panel", "agent-notes"],
-  "entities": ["lesson-review-row", "agent-review-note"],
+  "purpose": "Review teaching-report rows and compose a bounded UI-document patch with a human or the owning Agent.",
+  "views": ["review-table", "summary-panel", "approval-panel", "agent-notes", "ui-builder"],
+  "entities": ["lesson-review-row", "agent-review-note", "ui-document-proposal"],
   "entrypoints": ["index.html"],
   "observation_capabilities": ["runtime_snapshot", "semantic_context"],
   "result_sinks": [
@@ -35,6 +35,38 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 500
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "lesson-report.ui-document-patch.propose.v1",
+      "description": "Stage a bounded declarative UI-document patch proposal for the current preview; a human applies or discards it.",
+      "input_schema": {
+        "type": "object",
+        "required": ["contract_version", "document_id", "base_revision", "ops"],
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "type": "string",
+            "enum": ["artifact-ax.ui-document-patch.v1"]
+          },
+          "document_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "base_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ops": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object"
             }
           }
         }
@@ -167,6 +199,84 @@
         }
       },
       "result_sink": "lesson-report.agent-notes.upsert.v1"
+    },
+    {
+      "id": "lesson-report.compose-ui.v1",
+      "title": "Compose a bounded UI-document patch",
+      "description": "Propose a validated declarative UI-document patch from the user's bounded UI intent. The page stages it; a human applies or discards it.",
+      "input_schema": {
+        "type": "object",
+        "required": ["intent", "application", "document"],
+        "additionalProperties": false,
+        "properties": {
+          "intent": {
+            "type": "object",
+            "required": ["text"],
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            }
+          },
+          "application": {
+            "type": "object",
+            "required": ["artifact_id", "revision"],
+            "additionalProperties": false,
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "workspace_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "actor_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            }
+          },
+          "document": {
+            "type": "object",
+            "required": ["contract_version", "id", "revision"],
+            "additionalProperties": false,
+            "properties": {
+              "contract_version": {
+                "type": "string",
+                "enum": ["artifact-ax.ui-document.v1"]
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "nodes": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "result_sink": "lesson-report.ui-document-patch.propose.v1"
     }
   ]
 }

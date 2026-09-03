@@ -32,6 +32,29 @@ export interface FocusComposerView {
   commitLabel: string;
 }
 
+/** The compact proposal summary the Builder panel renders from a staged record. */
+export interface UiBuilderProposalView {
+  state: string;
+  summary: string;
+  base_revision: number;
+  op_count: number;
+  created_at?: string;
+  applied_revision?: number;
+  error?: string;
+}
+
+export interface UiBuilderView {
+  intent: string;
+  status: string;
+  requestLabel: string;
+  applyLabel: string;
+  discardLabel: string;
+  proposal: UiBuilderProposalView;
+  requestDisabled: boolean;
+  applyDisabled: boolean;
+  discardDisabled: boolean;
+}
+
 export interface UIDocumentView {
   manifest: Manifest;
   projection: Projection;
@@ -47,6 +70,7 @@ export interface UIDocumentView {
   agentNotes: AgentNoteRecord[];
   eventLines: string[];
   outbox: { label: string; items: OutboxItemView[] };
+  uiBuilder: UiBuilderView;
   transportNote: string;
 }
 
@@ -58,4 +82,16 @@ export const EMPTY_FOCUS: FocusComposerView = {
   runNote: '',
   expanded: false,
   commitLabel: 'Compose context bundle',
+};
+
+export const EMPTY_UI_BUILDER: UiBuilderView = {
+  intent: '',
+  status: '',
+  requestLabel: 'Request UI change',
+  applyLabel: 'Apply proposal',
+  discardLabel: 'Discard proposal',
+  proposal: { state: 'none', summary: '', base_revision: 0, op_count: 0 },
+  requestDisabled: false,
+  applyDisabled: true,
+  discardDisabled: true,
 };

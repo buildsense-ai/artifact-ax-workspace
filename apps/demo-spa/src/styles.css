@@ -404,6 +404,42 @@ button:focus-visible {
   color: var(--accent);
 }
 
+.region-ui-builder {
+  border-color: #d9e2f2;
+}
+
+.ui-builder-hint {
+  margin: 0 0 12px;
+}
+
+.ui-builder-status {
+  display: inline-block;
+  margin-left: 4px;
+}
+
+.ui-builder-proposal {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--bg);
+  margin-top: 12px;
+}
+
+.ui-builder-proposal[data-proposal-state='applied'] {
+  border-color: #d9e8de;
+  background: #f7fbf8;
+}
+
+.ui-builder-proposal[data-proposal-state='discarded'] {
+  border-color: #f0d9d5;
+  background: #fdf7f6;
+}
+
+.ui-builder-error {
+  margin: 8px 0 0;
+  color: var(--bad);
+}
+
 footer {
   text-align: center;
   margin-top: 24px;

@@ -51,8 +51,21 @@ import {
 import { resolveConfig, createGateway, createBridgeClient, createAuthClient, hydrateSessionActor, ACTOR_OPTIONS } from './transport.js';
 import { LESSON_REPORT_DOCUMENT } from './ui/lesson-report.document.js';
 import { renderApp, type SemanticDispatch, type ShellView } from './ui/catalog-renderer.js';
-import type { OutboxItemView, UIDocumentView } from './ui/view-model.js';
+import type { OutboxItemView, UiBuilderView, UIDocumentView } from './ui/view-model.js';
 import { applyUiDocumentPatch, readDraftPatchParam } from './ui/ui-draft.js';
+import {
+  CLOUD_UI_RESULT_SINK_ID,
+  CLOUD_UI_TASK_INTENT_ID,
+  UI_PATCH_RESULT_SCHEMA,
+  UI_PROPOSAL_STORAGE_KEY,
+  UiProposalManager,
+  buildUiComposeBundle,
+  buildUiComposePayload,
+  buildUiDocumentMeta,
+  loadUiProposals,
+  uiProposalStorageKey,
+  type UiProposalRecord,
+} from './ui-builder.js';
 
 /** Regions a mutation intent may not target (derived / read-only views). */
 const READ_ONLY_REGIONS = new Set(['summary-panel', 'approval-panel']);
@@ -160,6 +173,8 @@ function appliedReceipt(note: AgentNoteRecord, noteCount = 1): ArtifactResultRes
   };
 }
 
+
+
 function cloneArtifactResultResponse(response: ArtifactResultResponse): ArtifactResultResponse {
   return {
     ...response,
@@ -201,6 +216,13 @@ export class DemoApp {
   private focusExpanded = false;
   private transportLabel = '';
   private actionStatus = '';
+  /** Formal compose-ui Host outbox (only when an injected Cloud Host exists). */
+  private uiOutbox: CloudHostOutbox | null = null;
+  /** Builder panel intent, kept across re-renders so keystrokes never lose focus. */
+  private uiIntentText = '';
+  private uiBuilderStatus = '';
+  private uiProposalManager = new UiProposalManager();
+  private uiProposalStorageKey: string = UI_PROPOSAL_STORAGE_KEY;
 
   constructor(
     private readonly gateway: AxGateway,
@@ -233,8 +255,25 @@ export class DemoApp {
     this.bridgeClient = bridgeClient;
     this.cloudHost = cloudHost;
     this.cloudOutbox = cloudOutbox;
+    // Formal compose-ui Host outbox: it dispatches the compose-ui task through
+    // the injected Host port only, with a bounded payload built from the current
+    // UI document/config + app revision + user UI intent. No Host means this
+    // stays null and the builder never pretends to dispatch a task.
+    this.uiOutbox = cloudHost
+      ? new CloudHostOutbox({
+          host: cloudHost,
+          taskIntentId: CLOUD_UI_TASK_INTENT_ID,
+          payloadMapper: (bundle) => buildUiComposePayload({ bundle, document: activeDocument, workspaceId: config.workspaceId }),
+        })
+      : null;
     this.notesStorageKey = agentNotesStorageKey(config.workspaceId, config.artifactId, config.actor.id);
     this.agentNotes = loadAgentNotes(this.browserStorage(), this.notesStorageKey);
+    this.uiProposalStorageKey = uiProposalStorageKey(config.workspaceId, config.artifactId, config.actor.id);
+    this.uiProposalManager = new UiProposalManager({
+      storage: this.browserStorage(),
+      storageKey: this.uiProposalStorageKey,
+      initial: loadUiProposals(this.browserStorage(), this.uiProposalStorageKey),
+    });
     this.trigger = new TriggerService({
       outbox,
       actorId: config.actor.id,
@@ -324,6 +363,18 @@ export class DemoApp {
       case 'resumeBundle':
         void this.resumeCloudBundle(String(payload.bundleId ?? ''));
         break;
+      case 'uiIntentInput':
+        this.onUiIntentInput(String(payload.value ?? ''));
+        break;
+      case 'requestUiProposal':
+        void this.requestUiProposal();
+        break;
+      case 'applyUiProposal':
+        void this.applyUiProposal();
+        break;
+      case 'discardUiProposal':
+        void this.discardUiProposal();
+        break;
       case 'switchActor':
         this.switchActor(String(payload.actor ?? ''));
         break;
@@ -339,6 +390,14 @@ export class DemoApp {
     this.agentNotes = loadAgentNotes(this.browserStorage(), this.notesStorageKey);
     this.resultReceipts.clear();
     this.resultFingerprints.clear();
+    // Reset the compose-ui builder to the new actor-scoped browser store.
+    this.uiProposalStorageKey = uiProposalStorageKey(config.workspaceId, config.artifactId, id);
+    this.uiProposalManager = new UiProposalManager({
+      storage: this.browserStorage(),
+      storageKey: this.uiProposalStorageKey,
+      initial: loadUiProposals(this.browserStorage(), this.uiProposalStorageKey),
+    });
+    this.uiBuilderStatus = '';
     void this.refresh();
   }
 
@@ -492,6 +551,7 @@ export class DemoApp {
       agentNotes: notes,
       eventLines: events.slice(-12).map((event: Event) => `${event.seq} ${event.type} by ${event.actor.id} → ${JSON.stringify(event.data)}`),
       outbox: this.buildOutboxView(),
+      uiBuilder: this.buildUiBuilderView(),
       transportNote: `transport: ${this.transportLabel}`,
     };
   }
@@ -542,6 +602,101 @@ export class DemoApp {
     }
     const note = document.getElementById('transport-note');
     if (note) note.textContent = `ui_draft rejected: ${result.message}`;
+  }
+
+  // -------------------------------------------------- formal compose-ui builder
+
+  /** Store the Builder intent without re-rendering so keystrokes never lose focus. */
+  private onUiIntentInput(value: string): void {
+    this.uiIntentText = value;
+  }
+
+  /** Send the compose-ui task through the injected Cloud Host port (explicit action only). */
+  private async requestUiProposal(): Promise<void> {
+    if (!this.state || !this.uiOutbox) {
+      this.uiBuilderStatus = 'No Cloud Artifact Host; a UI change request is only available in the embedded page.';
+      this.renderApp();
+      return;
+    }
+    const intent = this.uiIntentText.trim();
+    if (!intent) {
+      this.uiBuilderStatus = 'Describe the desired UI change before requesting it.';
+      this.renderApp();
+      return;
+    }
+    const bundle = buildUiComposeBundle({
+      actorId: this.state.actor.id,
+      artifactId: this.state.manifest.artifact_id,
+      revision: this.state.projection.revision,
+      sessionId: 'topic_lesson_report',
+      intentText: intent,
+    });
+    this.uiBuilderStatus = 'Sending the UI change request through the Cloud Artifact Host…';
+    this.renderApp();
+    try {
+      const receipt = await this.uiOutbox.send(bundle);
+      const unavailable = receipt.task_status === 'unavailable' || receipt.status === 'unavailable';
+      this.uiBuilderStatus = unavailable
+        ? `Cloud Host did not create a task: ${receipt.message}`
+        : receipt.ok
+          ? `Cloud Host accepted the UI request${receipt.task_id ? ` (task ${receipt.task_id})` : ''}; a staged proposal will appear after the Agent turn.`
+          : `Cloud Host rejected the UI request: ${receipt.message}`;
+    } catch (error) {
+      this.uiBuilderStatus = `UI request failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    this.renderApp();
+  }
+
+  /** Human Apply: revalidate against the then-current document, apply, persist. */
+  private async applyUiProposal(): Promise<void> {
+    const result = this.uiProposalManager.apply(activeDocument);
+    if (!result.ok) {
+      this.uiBuilderStatus = result.record ? `Apply rejected: ${result.message}` : 'No staged UI proposal to apply.';
+      this.renderApp();
+      return;
+    }
+    activeDocument = result.document;
+    this.uiBuilderStatus = `Applied ${result.record.summary} (document revision ${result.document.revision}).`;
+    this.renderApp();
+  }
+
+  /** Human Discard: remove the staged proposal (never apply merely because it was delivered). */
+  private async discardUiProposal(): Promise<void> {
+    const result = this.uiProposalManager.discard();
+    this.uiBuilderStatus = result.ok ? result.message : 'No staged UI proposal to discard.';
+    this.renderApp();
+  }
+
+  private currentUiProposal(): UiProposalRecord | null {
+    return this.uiProposalManager.current();
+  }
+
+  private buildUiBuilderView(): UiBuilderView {
+    const proposal = this.currentUiProposal();
+    const noHost = this.uiOutbox === null;
+    const status = this.uiBuilderStatus || (noHost
+      ? 'UI Builder needs an embedded Cloud Artifact Host; this standalone page does not dispatch a compose-ui task.'
+      : 'Describe a bounded UI change to request it through the Cloud Artifact Host.');
+    return {
+      intent: this.uiIntentText,
+      status,
+      requestLabel: 'Request UI change',
+      applyLabel: 'Apply proposal',
+      discardLabel: 'Discard proposal',
+      proposal: proposal
+        ? {
+            state: proposal.state,
+            summary: proposal.summary,
+            base_revision: proposal.base_revision,
+            op_count: proposal.op_count,
+            ...(proposal.applied_revision !== undefined ? { applied_revision: proposal.applied_revision } : {}),
+            ...(proposal.error !== undefined ? { error: proposal.error } : {}),
+          }
+        : { state: 'none', summary: '', base_revision: 0, op_count: 0 },
+      requestDisabled: noHost,
+      applyDisabled: proposal === null || proposal.state === 'stale',
+      discardDisabled: proposal === null,
+    };
   }
 
   private renderApp(): void {
@@ -729,6 +884,7 @@ export class DemoApp {
       visibleRows: rows,
       selections: this.state.focusSelections,
       notes: this.agentNotes,
+      documentMeta: buildUiDocumentMeta(activeDocument),
       ...(options?.include_events
         ? {
             includeEvents: true,
@@ -753,16 +909,19 @@ export class DemoApp {
       return Promise.resolve(resultFailure('invalid_request', 'result request is invalid'));
     }
     if (resultId === '') return this.applyArtifactResultOnce(request).then(cloneArtifactResultResponse);
-    const pending = this.pendingResults.get(resultId);
+    // Sink-scoped idempotency key: the same result id must never collide with a
+    // different sink (e.g. an agent-note result id reused for a UI patch).
+    const requestKey = `${String(request?.sink_id ?? '')}::${resultId}`;
+    const pending = this.pendingResults.get(requestKey);
     if (pending) return pending.then(cloneArtifactResultResponse);
     const promise = this.applyArtifactResultOnce(request);
-    this.pendingResults.set(resultId, promise);
+    this.pendingResults.set(requestKey, promise);
     void promise.then(
       () => {
-        if (this.pendingResults.get(resultId) === promise) this.pendingResults.delete(resultId);
+        if (this.pendingResults.get(requestKey) === promise) this.pendingResults.delete(requestKey);
       },
       () => {
-        if (this.pendingResults.get(resultId) === promise) this.pendingResults.delete(resultId);
+        if (this.pendingResults.get(requestKey) === promise) this.pendingResults.delete(requestKey);
       },
     );
     return promise.then(cloneArtifactResultResponse);
@@ -771,6 +930,7 @@ export class DemoApp {
   private async applyArtifactResultOnce(request: ArtifactResultRequest): Promise<ArtifactResultResponse> {
     if (!this.state) return resultFailure('application_unavailable', 'application state is not ready');
     if (!isResultRequest(request)) return resultFailure('invalid_request', 'result request is invalid');
+    if (request.sink_id === CLOUD_UI_RESULT_SINK_ID) return this.applyUiDocumentResult(request);
     if (request.sink_id !== CLOUD_RESULT_SINK_ID) return resultFailure('unknown_sink', 'result sink is not declared by this application');
     if (!isCloudResultId(request.result_id)) return resultFailure('invalid_result_id', 'result id is invalid');
 
@@ -833,6 +993,29 @@ export class DemoApp {
     this.resultFingerprints.set(request.result_id, fingerprint);
     this.renderApp();
     return receipt;
+  }
+
+  private async applyUiDocumentResult(request: ArtifactResultRequest): Promise<ArtifactResultResponse> {
+    if (!this.state) return resultFailure('application_unavailable', 'application state is not ready');
+    if (!isCloudResultId(request.result_id)) return resultFailure('invalid_result_id', 'result id is invalid');
+    try {
+      // Manifest-layer envelope bounds (object/array bounds only).
+      validateResultPayload(UI_PATCH_RESULT_SCHEMA, request.payload);
+    } catch (error) {
+      return resultFailure('invalid_payload', error instanceof Error ? error.message : 'UI patch proposal does not match the declared sink schema');
+    }
+    // Exact catalog / op / anchor / stale validation, plus sink-scoped
+    // idempotency and durable staging, happen in the manager. A delivered patch
+    // is *staged only*; a human applies or discards it later.
+    const result = this.uiProposalManager.stage({
+      result_id: request.result_id,
+      payload: request.payload,
+      document: activeDocument,
+    });
+    if (!result.ok) return resultFailure(result.code, result.message);
+    this.uiBuilderStatus = `Staged ${result.record.summary}; review and apply or discard it.`;
+    this.renderApp();
+    return { status: 'applied', receipt: { ...result.receipt } };
   }
 
   private browserStorage(): Storage | undefined {

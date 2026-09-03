@@ -155,11 +155,16 @@ SPA.
   (`catsco.artifact-manifest.v1/v2/v3`), bounded result schemas, trust-separated
   Observation Packets, task statuses, and application receipts. These are
   transport-neutral types; they do not call a Host or an Agent.
-- `apps/demo-spa/public/artifact-manifest.json` declares one real v3 task,
-  `lesson-report.review-selection.v1`, and one result sink,
-  `lesson-report.agent-notes.upsert.v1`. The task input is a bounded projection
-  of the existing ContextBundle. The sink accepts only a summary plus known
-  row IDs and recommendations.
+- `apps/demo-spa/public/artifact-manifest.json` declares two real v3 tasks,
+  each linked to a declared result sink: `lesson-report.review-selection.v1` →
+  `lesson-report.agent-notes.upsert.v1` (review a bounded ContextBundle) and
+  `lesson-report.compose-ui.v1` →
+  `lesson-report.ui-document-patch.propose.v1` (propose a bounded declarative
+  UI-document patch). The review task input is a bounded projection of the
+  existing ContextBundle. The compose-ui task input is the current final UI
+  document/configuration, the current application revision/identity, and the
+  user's requested UI intent — never event history, task refs, writeback refs,
+  or credentials.
 - The page exposes `window.catscoArtifact.getContext()` as a synchronous,
   read-only **final-state-first** semantic snapshot: the latest final
   projection/result summary plus stable refs only (`semantic_mode: 'final-state'`,
@@ -275,16 +280,22 @@ is unchanged. Stable `data-region-id`/`data-node-id` anchors and the
 
 ### V1 limits (honest)
 
-- **Fixed catalog, one document model.** Only the seven listed surfaces exist;
+- **Fixed catalog, one document model.** Only the eight listed catalog
+  surfaces exist (`review-table`, `summary-list`, `approval-list`,
+  `focus-composer`, `agent-notes`, `event-log`, `context-outbox`, `ui-builder`);
   adding one means extending the package catalog, the renderer, and tests.
-- **Draft-only patch.** A builder can submit a validated `?ui_patch=` patch that
-  re-renders the same surfaces. It is local-only and never writes into the
-  production manifest, the XiaoBa task/result contract, or any cats-company
-  surface. The patch boundary also keeps the stable anchors authoritative: the
-  resulting node/region ids must stay within the deployed lesson-report set.
-  The production task/sink **IDs and payload schema are unchanged**; the page
-  `getContext`/OBSERVE context semantics are documented in `docs/13` and the
-  lesson-report Skill reference (the static patch path is draft-only).
+- **Draft-only patch (developer seam) + formal compose-ui path.** A builder can
+  submit a validated `?ui_patch=` patch that re-renders the same surfaces. It is
+  local-only and never writes into the production manifest, the XiaoBa
+  task/result contract, or any cats-company surface. The patch boundary also
+  keeps the stable anchors authoritative: the resulting node/region ids must
+  stay within the deployed lesson-report set. The production manifest now also
+  declares a formal compose-ui task (`lesson-report.compose-ui.v1`) and a UI
+  patch result sink (`lesson-report.ui-document-patch.propose.v1`). The Agent's
+  proposed `UiDocumentPatch` is validated and **staged only** by the page; a
+  human applies or discards it (the draft is never applied merely because it was
+  delivered). The page `getContext`/OBSERVE context semantics are documented in
+  `docs/13` and the lesson-report Skill reference.
 - **Final-state-first Agent context (page `getContext`).** The default
   `getContext()` is the latest final projection/result summary plus stable refs
   only. It is **not** the Cloud task payload: the task payload emitted by
@@ -306,12 +317,19 @@ Deploy exactly two composable Skills to the target XiaoBa Agent:
 | Layer | Skill | Responsibility |
 | --- | --- | --- |
 | Platform | cloud-html-artifact, existing version 1.4.0 package | Read the one-shot task/current-page context, preserve trusted routing, and write a declared result sink. |
-| Application | lesson-report-artifact | Review the selected teaching-report context and produce only the bounded Agent-note result. |
+| Application | lesson-report-artifact | Review the selected teaching-report context and produce only the bounded Agent-note result, and propose a bounded UI-document patch for the compose-ui task. |
 
-The published page requests lesson-report.review-selection.v1 only after an
-explicit user send. The platform Host turns that request into one normal visible
-turn; the two Skills complete it only when
-lesson-report.agent-notes.upsert.v1 returns the application's applied receipt.
+The application Skill supports exactly two task-to-sink mappings, both requested
+only after an explicit user send and both complete only when the exact result
+sink returns the application's applied receipt:
+
+- `lesson-report.review-selection.v1` →
+  `lesson-report.agent-notes.upsert.v1` (review note).
+- `lesson-report.compose-ui.v1` →
+  `lesson-report.ui-document-patch.propose.v1` (UI patch proposal). A UI patch
+  is **staged only** until a human applies or discards it in the page; it is
+  never applied merely because it was delivered.
+
 There is no Artifact Bridge, artifactctl context, custom HTTP endpoint, local
 pairing token, or cats-company source change in this deployment path.
 

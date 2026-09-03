@@ -187,6 +187,27 @@ describe('@artifact-ax/ui-document · document validation', () => {
     expect(validateNode({ id: 'review-table', kind: 'review-table' })).toEqual([]);
     expect(CATALOG['review-table']).toBeDefined();
   });
+
+  it('validates the ui-builder catalog surface and enforces its allowlists', () => {
+    const node = {
+      id: 'ui-builder',
+      kind: 'ui-builder',
+      placement: 'full' as const,
+      props: { regionId: 'ui-builder', regionTitle: 'UI Builder', hint: 'Describe a change.' },
+      bindings: {
+        intent: 'uiBuilder.intent',
+        status: 'uiBuilder.status',
+        proposal: 'uiBuilder.proposal',
+        requestDisabled: 'uiBuilder.requestDisabled',
+      },
+      events: { request: 'requestUiProposal', apply: 'applyUiProposal', discard: 'discardUiProposal', intent: 'uiIntentInput' },
+    };
+    expect(validateNode(node)).toEqual([]);
+    // Unknown prop / binding / event and an unset request action are rejected.
+    expect(validateNode({ ...node, props: { ...node.props, onClick: 'hack' } }).some((e) => e.includes('blocked executable presentation'))).toBe(true);
+    expect(validateNode({ ...node, bindings: { ...node.bindings, evil: 'x' } }).some((e) => e.includes('unknown binding'))).toBe(true);
+    expect(validateNode({ ...node, events: { ...node.events, apply: 'totallyWrong' } }).some((e) => e.includes('must be one of'))).toBe(true);
+  });
 });
 
 describe('@artifact-ax/ui-document · patch application', () => {

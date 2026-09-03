@@ -146,6 +146,33 @@ export const CATALOG: Catalog = {
       resume: ['resumeBundle'],
     },
   },
+
+  'ui-builder': {
+    kind: 'ui-builder',
+    description: 'Formal UI Builder surface: a user UI intent request action, a staged declarative UI-document proposal summary, and human apply/discard controls.',
+    props: {
+      regionId: regionIdProp,
+      regionTitle: titleProp(),
+      hint: stringProp(300),
+    },
+    bindings: {
+      intent: 'scalar',
+      status: 'scalar',
+      requestLabel: 'scalar',
+      applyLabel: 'scalar',
+      discardLabel: 'scalar',
+      proposal: 'record',
+      requestDisabled: 'scalar',
+      applyDisabled: 'scalar',
+      discardDisabled: 'scalar',
+    },
+    events: {
+      request: ['requestUiProposal'],
+      apply: ['applyUiProposal'],
+      discard: ['discardUiProposal'],
+      intent: ['uiIntentInput'],
+    },
+  },
 };
 
 export const CATALOG_KIND = Object.freeze(Object.keys(CATALOG));

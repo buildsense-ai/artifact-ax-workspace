@@ -323,6 +323,65 @@ function renderEventLog(ctx: NodeCtx): HTMLElement {
   return section;
 }
 
+function renderUiBuilder(ctx: NodeCtx): HTMLElement {
+  const { node, bindings, act } = ctx;
+  const regionTitle = asString(node.props?.regionTitle, 'UI Builder');
+  const hint = asString(node.props?.hint, '');
+  const intent = asString(bindings.intent, '');
+  const status = asString(bindings.status, '');
+  const requestLabel = asString(bindings.requestLabel, 'Request UI change');
+  const applyLabel = asString(bindings.applyLabel, 'Apply proposal');
+  const discardLabel = asString(bindings.discardLabel, 'Discard proposal');
+  const proposal = asRecord(bindings.proposal);
+  const requestDisabled = Boolean(bindings.requestDisabled);
+  const applyDisabled = Boolean(bindings.applyDisabled);
+  const discardDisabled = Boolean(bindings.discardDisabled);
+  const regionId = asString(node.props?.regionId, 'ui-builder');
+
+  const section = el('section', { class: 'region region-ui-builder', 'data-region-id': regionId, 'data-node-id': node.id, 'aria-label': regionTitle });
+  section.appendChild(el('div', { class: 'region-head' }, el('h2', {}, regionTitle)));
+  if (hint) section.appendChild(el('p', { class: 'muted ui-builder-hint' }, hint));
+
+  const intentLabel = el('label', { for: 'ui-builder-intent' }, 'Desired UI change (bounded request)');
+  const intentTextarea = el('textarea', { id: 'ui-builder-intent', rows: '3', placeholder: 'e.g. add a “Top students” summary card, or make the review table show the score column' });
+  (intentTextarea as HTMLTextAreaElement).value = intent;
+  intentTextarea.addEventListener('input', () => {
+    act('intent', { value: (intentTextarea as HTMLTextAreaElement).value });
+  });
+  section.appendChild(el('div', { class: 'field' }, intentLabel, intentTextarea));
+
+  const request = el('button', { id: 'ui-builder-request', class: 'btn btn-primary', type: 'button' }, requestLabel);
+  (request as HTMLButtonElement).disabled = requestDisabled;
+  request.addEventListener('click', () => act('request', {}));
+  const statusLine = el('span', { id: 'ui-builder-status', class: 'muted ui-builder-status', role: 'status' }, status);
+  section.appendChild(el('div', { class: 'region-actions' }, request, statusLine));
+
+  const proposalState = asString(proposal.state, 'none');
+  const proposalBox = el('div', { id: 'ui-builder-proposal', class: 'ui-builder-proposal', 'data-proposal-state': proposalState });
+  if (proposalState === 'none') {
+    proposalBox.appendChild(el('p', { class: 'muted' }, 'No staged UI proposal. An Agent-submitted patch is staged here until a human applies or discards it.'));
+  } else {
+    const badge = statusBadge(proposalState === 'applied' ? 'approved' : proposalState === 'discarded' ? 'rejected' : 'pending');
+    const head = el('div', { class: 'outbox-head' }, badge, el('span', { class: 'outbox-title' }, asString(proposal.summary, '')), el('span', { class: 'muted' }, `base revision ${asString(proposal.base_revision, '0')} · ${asString(proposal.op_count, '0')} op${asString(proposal.op_count, '0') === '1' ? '' : 's'}`));
+    proposalBox.appendChild(head);
+    if (proposal.error) {
+      proposalBox.appendChild(el('p', { class: 'ui-builder-error muted' }, asString(proposal.error)));
+    }
+    const actions = el('div', { class: 'region-actions' });
+    const apply = el('button', { id: 'ui-builder-apply', class: 'btn btn-approve', type: 'button' }, applyLabel);
+    (apply as HTMLButtonElement).disabled = applyDisabled;
+    apply.addEventListener('click', () => act('apply', {}));
+    const discard = el('button', { id: 'ui-builder-discard', class: 'btn btn-reject', type: 'button' }, discardLabel);
+    (discard as HTMLButtonElement).disabled = discardDisabled;
+    discard.addEventListener('click', () => act('discard', {}));
+    actions.appendChild(apply);
+    actions.appendChild(discard);
+    proposalBox.appendChild(actions);
+  }
+  section.appendChild(proposalBox);
+  return section;
+}
+
 function renderOutbox(ctx: NodeCtx): HTMLElement {
   const { node, bindings, act } = ctx;
   const items = asList(bindings.items) as OutboxItemView[];
@@ -384,6 +443,8 @@ export function renderNode(node: UiNode, view: UIDocumentView, dispatch: Semanti
       return renderApprovalList(ctx);
     case 'focus-composer':
       return renderFocusComposer(ctx);
+    case 'ui-builder':
+      return renderUiBuilder(ctx);
     case 'agent-notes':
       return renderAgentNotes(ctx);
     case 'event-log':
