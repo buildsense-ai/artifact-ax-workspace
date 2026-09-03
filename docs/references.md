@@ -32,6 +32,10 @@ official publisher, injected bridge, and branding assets under CatsCo control.
 
 ## Local CatsCo sources
 
+- [cats-company/server/skillhub_proxy.go](../../cats-company/server/skillhub_proxy.go)
+- [cats-company/server/bot_skill_config.go](../../cats-company/server/bot_skill_config.go)
+- [cats-company/server/device_connector.go](../../cats-company/server/device_connector.go)
+- [cats-company/server/cmd/server.go](../../cats-company/server/cmd/server.go)
 - [`cats-company/README.md`](../../cats-company/README.md)
 - [`cats-company/server/auth.go`](../../cats-company/server/auth.go)
 - [`cats-company/server/cloud_artifacts.go`](../../cats-company/server/cloud_artifacts.go)

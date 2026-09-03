@@ -6,12 +6,18 @@ This repository now contains a working **compatibility-first vertical slice** on
 
 ## Thesis
 
-An Artifact is a normal application that people can use directly. It exposes a semantic surface that Agents can discover and operate through an external capability gateway such as one CLI. The application remains useful when no Agent is connected.
+An Artifact is a normal application that people can use directly. Its formal
+XiaoBa deployment uses installed Skills and the platform-provided Artifact Host,
+not this repository's standalone Bridge. The application remains useful when no
+Agent is connected.
+
+The local AX gateway diagram below remains valuable for development and
+contract testing; it is not the production XiaoBa deployment path.
 
 ```text
 Instruction
     ↓
-One external capability gateway (artifactctl / HTTP gateway)
+Development/test semantic gateway (artifactctl / HTTP gateway)
     ↓
 AX-friendly Artifact SPA
     ├─ human UI
@@ -20,7 +26,10 @@ AX-friendly Artifact SPA
     └─ structured events
 ```
 
-The Agent does not need to know the SPA framework, inspect pixels, or embed a generic Artifact runtime. AG-UI can act as an adapter at the boundary when a host needs its event vocabulary; the Artifact domain model stays independent.
+The Agent does not need to know the SPA framework, inspect pixels, embed a
+generic Artifact runtime, or call a custom page-to-Agent service. AG-UI remains
+an optional developer adapter; the production task/result path is the versioned
+Cloud Artifact contract.
 
 ## What works today (the vertical slice)
 
@@ -84,13 +93,17 @@ behavior. It never applies a mutation silently.
   decision badge, risk/confidence, rationale, and a `context_ref` to the full
   mock payload.
 
-The current outbox is intentionally local. CatsCo's existing message endpoint
-would make a bundle visible in chat; keeping it hidden and structured is now
-handled by an optional AG-UI-compatible projection at the standalone bridge
-boundary. The Artifact itself still does not depend on AG-UI or an Agent
-runtime.
+The standalone outbox is intentionally local. The deployed path does not send a
+ContextBundle to a custom chat endpoint: an explicit page action uses the
+platform Host to create one normal visible task turn. The optional AG-UI
+projection and standalone Bridge remain developer harnesses only. The Artifact
+itself still does not depend on AG-UI or an Agent runtime.
 
-## External Agent Bridge (third slice)
+## Developer-only Artifact Bridge harness
+
+Keep this implemented slice for isolated transport, CLI, durability, and AG-UI
+experiments. Do not deploy it with XiaoBa and do not treat it as a prerequisite
+for the Cloud Artifact task path described below.
 
 The smallest usable external **Agent Bridge / Inbox**: the SPA can deliver a
 `ContextBundle` to an external Agent through a standalone loopback HTTP bridge
@@ -183,9 +196,29 @@ command and human approval flow. A production application can replace the
 localStorage sink with its own durable store while keeping the same manifest
 and receipt boundary.
 
-## Optional CatsCo session boundary
+## XiaoBa Skills: formal deployment path
 
-The bridge can also expose a server-side transitional identity adapter. It
+Deploy exactly two composable Skills to the target XiaoBa Agent:
+
+| Layer | Skill | Responsibility |
+| --- | --- | --- |
+| Platform | cloud-html-artifact, existing version 1.4.0 package | Read the one-shot task/current-page context, preserve trusted routing, and write a declared result sink. |
+| Application | lesson-report-artifact | Review the selected teaching-report context and produce only the bounded Agent-note result. |
+
+The published page requests lesson-report.review-selection.v1 only after an
+explicit user send. The platform Host turns that request into one normal visible
+turn; the two Skills complete it only when
+lesson-report.agent-notes.upsert.v1 returns the application's applied receipt.
+There is no Artifact Bridge, artifactctl context, custom HTTP endpoint, local
+pairing token, or cats-company source change in this deployment path.
+
+Read [XiaoBa Skill deployment boundary](docs/13-xiaoba-skill-deployment.md) for
+the canonical Skill source/package, observed SkillHub facts, external
+preconditions, and acceptance test.
+
+## Developer-only transitional bridge auth
+
+The developer harness can also expose a server-side transitional identity adapter. It
 calls CatsCo's documented account-center introspection endpoint with a
 server-only Service Token, then gives the browser a short-lived HttpOnly
 `artifact_ax_session` cookie. The user JWT is never persisted, and the Service
@@ -274,8 +307,11 @@ packages/
   catsco-adapter/  # Artifact node server + browser-safe HTTP gateway client
 apps/
   artifactctl/     # JSON CLI over the AX gateway (thick gateway, thin client)
-  artifact-bridge/ # external Agent Bridge server (loopback HTTP inbox; in-memory or durable JSON-file store)
+  artifact-bridge/ # developer-only Agent Bridge server (loopback HTTP inbox; in-memory or durable JSON-file store)
   demo-spa/        # teaching-report SPA + Cloud Artifact page/task/writeback surface
+skills/
+  lesson-report-artifact/ # XiaoBa domain Skill source
+skill-packages/    # validated portable Skill archive
 docs/              # design docs (unchanged) + roadmap.md
 ```
 
@@ -322,6 +358,7 @@ local by default.
 - [AG-UI adapter boundary](docs/10-ag-ui-adapter.md)
 - [Transitional auth adapter](docs/11-transitional-auth-adapter.md)
 - [Cloud HTML Artifact Host adapter](docs/12-cloud-artifact-host.md)
+- [XiaoBa Skill deployment boundary](docs/13-xiaoba-skill-deployment.md)
 - [ADR 0001: standalone AX-friendly app](docs/adr/0001-standalone-ax-friendly-app.md)
 - [Roadmap](docs/roadmap.md)
 - [References](docs/references.md)

@@ -1,6 +1,6 @@
 # Roadmap
 
-Status of the compatibility-first vertical slices (2026-08-28), what is mock
+Status of the compatibility-first vertical slices (2026-09-03), what is mock
 vs CatsCo-compatible, and what is not yet implemented.
 
 ## Delivered in the first slice
@@ -117,7 +117,12 @@ Added on top of the vertical slice, still fully local:
 - **Draft branching / merge**: two builders from one base are preserved as
   separate drafts, but rebase/merge is not implemented.
 
-## External Agent Bridge / Inbox (third slice)
+## Developer-only Artifact Bridge harness (third slice)
+
+Keep this implemented slice for isolated transport and AG-UI experiments. It is
+not part of the XiaoBa deployment target: do not deploy it beside the Artifact,
+do not use it to inject a task, and do not treat its auth or persistence as a
+production prerequisite.
 
 A standalone, minimal bridge so the SPA can hand a `ContextBundle` to an
 external Agent without modifying cats-company and without an Artifact runtime.
@@ -204,6 +209,23 @@ copy of the Skill's publisher, injected bridge, or Agent runtime.
 See [12-cloud-artifact-host.md](12-cloud-artifact-host.md) for the boundary,
 manifest IDs, local commands, and explicit non-goals.
 
+## XiaoBa Skill deployment (formal path)
+
+The deployed Agent uses two installed Skills, with no standalone Bridge:
+
+| Surface | Status |
+| --- | --- |
+| Existing cloud-html-artifact platform Skill, version 1.4.0: one-shot task/context readers and declared result writer | external prerequisite; read-only local package inspected |
+| lesson-report-artifact domain Skill: review rules, exact task/sink routing, bounded note schema, applied-only completion rule | packaged + validated in this repository |
+| Generic artifact-ax runtime/transport Skill | deliberately deferred; there is only one concrete hosted task consumer |
+| Bridge, artifactctl context, AG-UI projection, and transitional bridge auth | developer-only harness; excluded from the XiaoBa path |
+| Direct XiaoBa/SkillHub import command | not claimed; target Bot identity, credentials, and import wire format remain operator-owned |
+
+The production acceptance test is one explicit page review action that becomes
+one visible XiaoBa turn and returns an application receipt with status applied.
+See [13-xiaoba-skill-deployment.md](13-xiaoba-skill-deployment.md) for the
+source facts, deployment assumptions, and test steps.
+
 ## Round-trip against a real cats-company server
 
 Not yet run. The next phase should point `CATSCO_ARTIFACT_INDEX_URL` and
@@ -213,6 +235,9 @@ above). This is the highest-value follow-up.
 
 ## Suggested next phases
 
+- Phase 0: install the two declared Skills in a target XiaoBa Agent and run one
+  real Cloud Artifact task/result round-trip against a published immutable
+  version. This is the formal deployment acceptance test.
 - Phase 1: round-trip against cats-company (above); fix any drift.
 - Phase 2: replace in-memory domain with a durable store behind the same
   `AxGateway` seam (two adapter rule now holds: in-memory + HTTP).
@@ -227,3 +252,6 @@ above). This is the highest-value follow-up.
 - Phase 6: native OAuth/OIDC per docs/09; connect a real Agent runner or MCP
   adapter behind the existing AG-UI projection without changing the Artifact
   or bridge contracts.
+
+The Bridge-only phase items remain developer-harness work. They are not
+dependencies of Phase 0 or of a XiaoBa Skill deployment.

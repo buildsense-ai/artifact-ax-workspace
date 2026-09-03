@@ -13,6 +13,14 @@ The implementation was compared with the local `cloud-html-artifact` package
 `references/publication-contract.md`. Those files define the platform contract;
 they do not become a runtime dependency of the SPA.
 
+## Formal XiaoBa path
+
+Use the injected Cloud Artifact Host plus the installed cloud-html-artifact and
+lesson-report-artifact Skills for deployment. Keep the standalone Artifact
+Bridge, artifactctl context commands, AG-UI projection, and transitional bridge
+auth as local development harnesses only. The page never needs a custom
+page-to-Agent endpoint or a cats-company source modification.
+
 ## Boundary
 
 ```text
