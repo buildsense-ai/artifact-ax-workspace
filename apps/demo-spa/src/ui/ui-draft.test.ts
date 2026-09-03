@@ -49,4 +49,26 @@ describe('demo-spa · UI-document draft/patch boundary (draft-only)', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toContain('does not match document revision');
   });
+
+  it('rejects a patch that drifts the region/node anchors outside the deployed document', () => {
+    const result = applyUiDocumentPatch(LESSON_REPORT_DOCUMENT, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: LESSON_REPORT_DOCUMENT.revision,
+      ops: [{ op: 'update', id: 'review-table', update: { props: { regionId: 'admin-panel', regionTitle: 'Review table' } } }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('anchor_drift');
+  });
+
+  it('accepts a patch that stays within the deployed anchors', () => {
+    const result = applyUiDocumentPatch(LESSON_REPORT_DOCUMENT, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: LESSON_REPORT_DOCUMENT.revision,
+      ops: [{ op: 'update', id: 'review-table', update: { props: { regionId: 'review-table', regionTitle: 'Review table' } } }],
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.applied).toBe(1);
+  });
 });

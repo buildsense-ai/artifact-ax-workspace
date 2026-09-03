@@ -5,7 +5,7 @@ import type {
   UiDocument,
   UiNode,
 } from './types.js';
-import { CATALOG as catalogDef, catalogComponent } from './catalog.js';
+import { CATALOG as catalogDef } from './catalog.js';
 
 /**
  * Validation for the UI-document contract. This is the security-critical
@@ -189,7 +189,7 @@ function validateEvents(node: UiNode, def: CatalogComponent): string[] {
 
 export function validateNode(node: UiNode, catalog: Catalog = catalogDef): string[] {
   const errors: string[] = [];
-  const def = catalogComponent(node.kind);
+  const def = catalog[node.kind];
   if (def === undefined) {
     return [`node ${node.id}: unknown catalog kind "${node.kind}"`];
   }

@@ -228,15 +228,18 @@ execution.
 | Stable `data-region-id`/`data-node-id`/`data-artifact-id` anchors, projection + semantic command/event seams, Cloud Host/task/result sink behavior | preserved |
 | React + Vercel json-render + shadcn/Base UI catalog | **not used**: would require converting the framework-free SPA and re-implementing its DOM-coupled transport/bridge/Cloud Host wiring; an equally constrained catalog renderer is used instead (reason documented in README) |
 | Generic, extensible Artifact runtime or agent-controlled UI code | **out of scope**: the catalog is closed and props/bindings/events are allowlisted; no raw HTML/JS/CSS input is accepted |
-| Formal production manifest/task/result contract change | **not done**: the patch path is local draft-only; `artifact-manifest.json`, `docs/13` and the lesson-report Skill contract are unchanged |
+| Formal production manifest/task/result contract change | **not done**: the patch path is local draft-only; the production task/sink IDs and payload schema are unchanged (`artifact-manifest.json` untouched). The page `getContext`/OBSERVE context semantics are final-state-first and are documented in `docs/13` and the lesson-report Skill reference. |
 
 ### Carry-over rules
 
 - The document is version-level UI metadata (V1); it carries no rows,
   selections, prompts, credentials, or permission claims.
-- The Agent-facing context/task payload is **final-state-first**: latest final
-  projection/result summary plus stable refs only. Intermediate event/state
-  history is retained for a bounded optional query
+- The Agent-facing **context** (page `getContext`, read by the platform Skill
+  OBSERVE/task flow) is **final-state-first**: latest final projection/result
+  summary plus stable refs only. The Cloud task payload emitted by
+  `CloudHostOutbox` stays a bounded ContextBundle projection (selections,
+  intent, assessment) — it does not carry a final-state summary. Intermediate
+  event/state history is retained for a bounded optional query
   (`getContext({ include_events: true })`), never automatically injected and
   never required.
 - A builder patch is applied only after the same catalog allowlist validation;

@@ -150,12 +150,15 @@ export function buildSemanticContext(input: CloudContextInput): Record<string, u
   };
   // Optional, bounded event/state history: only when explicitly requested.
   if (input.includeEvents === true) {
-    const eventRefs = (input.events ?? []).slice(-(input.maxEvents ?? MAX_CONTEXT_EVENTS)).map((event) => ({
-      seq: event.seq,
-      type: event.type,
-      actor_id: event.actor_id,
-      summary: limitText(event.summary, MAX_EVENT_SUMMARY_LENGTH),
-    }));
+    const eventCount = normalizeMaxEvents(input.maxEvents);
+    const eventRefs = eventCount > 0
+      ? (input.events ?? []).slice(-eventCount).map((event) => ({
+          seq: event.seq,
+          type: event.type,
+          actor_id: event.actor_id,
+          summary: limitText(event.summary, MAX_EVENT_SUMMARY_LENGTH),
+        }))
+      : [];
     if (eventRefs.length > 0) context.events = eventRefs;
   }
   // The official bridge accepts at most 8 KiB of semantic state. Optional
@@ -288,6 +291,21 @@ function boundedText(value: unknown, maxLength: number): string | null {
 
 function limitText(value: string, maxLength: number): string {
   return Array.from(value).slice(0, maxLength).join('');
+}
+
+/**
+ * Normalize a caller-supplied event cap to `0 | 1..MAX_CONTEXT_EVENTS`.
+ * `0` means "no events" (so `slice(-0)` is never used, which would return the
+ * full list); non-numeric, non-finite, non-integer, or negative values fall back
+ * to the default cap `MAX_CONTEXT_EVENTS`; any value above the cap is hard-capped
+ * at `MAX_CONTEXT_EVENTS`. The opt-in event channel therefore never grows
+ * unbounded and never has an ambiguous "zero == whole list" behavior.
+ */
+function normalizeMaxEvents(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) return MAX_CONTEXT_EVENTS;
+  if (value < 1) return 0;
+  if (value > MAX_CONTEXT_EVENTS) return MAX_CONTEXT_EVENTS;
+  return value;
 }
 
 function unique(values: readonly string[]): string[] {

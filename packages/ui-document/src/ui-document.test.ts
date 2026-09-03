@@ -15,7 +15,7 @@ import {
   UI_DOCUMENT_PATCH_CONTRACT_VERSION,
   CATALOG,
 } from './index.js';
-import type { UiDocument } from './types.js';
+import type { Catalog, UiDocument } from './types.js';
 
 function lessonReportDocument(): UiDocument {
   return {
@@ -195,10 +195,10 @@ describe('@artifact-ax/ui-document · patch application', () => {
     const docBefore = JSON.parse(JSON.stringify(doc)) as UiDocument;
 
     const inserted = {
-      id: 'summary-list',
+      id: 'extra-summary',
       kind: 'summary-list',
       placement: 'side',
-      props: { regionId: 'summary-panel', regionTitle: 'Summary' },
+      props: { regionId: 'extra-region', regionTitle: 'Extra summary' },
       bindings: { counts: 'summary' },
       events: { focus: 'focusRegion' },
     };
@@ -284,6 +284,121 @@ describe('@artifact-ax/ui-document · patch application', () => {
       doc,
     );
     expect(errors.some((e) => e.includes('document_id must match'))).toBe(true);
+  });
+
+  it('rejects a multi-op patch whose cumulative result has a duplicate node id, without mutation', () => {
+    const doc = lessonReportDocument();
+    const duplicateSummary = { id: 'summary-list', kind: 'summary-list', placement: 'side', props: { regionId: 'summary-panel', regionTitle: 'Summary' } };
+    const result = applyPatch(doc, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: 1,
+      ops: [{ op: 'insert', index: 0, node: duplicateSummary }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('already exists');
+    expect(doc.revision).toBe(1);
+  });
+
+  it('rejects a multi-op patch that introduces a duplicate region id (cross-op outcome)', () => {
+    const doc = lessonReportDocument();
+    const result = applyPatch(doc, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: 1,
+      ops: [
+        { op: 'insert', index: 0, node: { id: 'summary-a', kind: 'summary-list', placement: 'side', props: { regionId: 'summary-panel', regionTitle: 'A' } } },
+        { op: 'insert', index: 1, node: { id: 'summary-b', kind: 'summary-list', placement: 'side', props: { regionId: 'summary-panel', regionTitle: 'B' } } },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('duplicate region id');
+    expect(doc.revision).toBe(1);
+  });
+
+  it('rejects an invalid cross-op outcome (removing a node twice)', () => {
+    const doc = lessonReportDocument();
+    const result = applyPatch(doc, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: 1,
+      ops: [
+        { op: 'remove', id: 'agent-notes' },
+        { op: 'remove', id: 'agent-notes' },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('does not exist');
+  });
+
+  it('rejects malformed ops (null, primitive, missing discriminant/fields) as invalid_patch, never throws', () => {
+    const doc = lessonReportDocument();
+    const malformedOps: unknown[][] = [
+      [null],
+      [123],
+      ['insert'],
+      [{}],
+      [{ op: 'bogus' }],
+      [{ op: 'insert' }],
+      [{ op: 'insert', index: 0 }],
+      [{ op: 'update' }],
+      [{ op: 'remove' }],
+    ];
+    for (const ops of malformedOps) {
+      const result = applyPatch(doc, {
+        contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+        document_id: 'lesson-report.v1',
+        base_revision: 1,
+        ops,
+      });
+      expect(result.ok, `ops: ${JSON.stringify(ops)}`).toBe(false);
+      if (!result.ok) expect(result.code).toBe('invalid_patch');
+    }
+  });
+
+  it('applies a chained patch (insert then update the inserted node) atomically', () => {
+    const doc = lessonReportDocument();
+    const result = applyPatch(doc, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: 1,
+      ops: [
+        { op: 'insert', index: 0, node: { id: 'extra-summary', kind: 'summary-list', placement: 'side', props: { regionId: 'extra-region', regionTitle: 'Extra' } } },
+        { op: 'update', id: 'extra-summary', update: { props: { regionId: 'extra-region', regionTitle: 'Extra updated' } } },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.document.nodes[0]!.id).toBe('extra-summary');
+  });
+
+  it('honors a passed custom catalog in validateNode and applyPatch', () => {
+    const customCatalog: Catalog = {
+      ...CATALOG,
+      'summary-list': {
+        ...CATALOG['summary-list']!,
+        props: { regionId: { type: 'string', maxLength: 6 }, regionTitle: { type: 'string', maxLength: 8 } },
+      },
+    };
+    // validateNode uses the injected catalog's prop schema, not the default.
+    expect(validateNode({ id: 's', kind: 'summary-list', props: { regionId: 'panel', regionTitle: 'Summary' } }, customCatalog)).toEqual([]);
+    expect(
+      validateNode({ id: 's', kind: 'summary-list', props: { regionId: 'toolongvalue', regionTitle: 'Summary' } }, customCatalog)
+        .some((e) => e.includes('at most 6')),
+    ).toBe(true);
+    // With the default catalog the same value passes (max length 64).
+    expect(validateNode({ id: 's', kind: 'summary-list', props: { regionId: 'toolongvalue', regionTitle: 'Summary' } })).toEqual([]);
+
+    // applyPatch validates an update against the injected catalog.
+    const doc = lessonReportDocument();
+    const result = applyPatch(doc, {
+      contract_version: UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+      document_id: 'lesson-report.v1',
+      base_revision: 1,
+      ops: [{ op: 'update', id: 'summary-list', update: { props: { regionId: 'toolongvalue' } } }],
+    }, customCatalog);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toContain('at most 6');
   });
 });
 

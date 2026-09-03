@@ -28,6 +28,26 @@ The resulting production flow is:
 No custom page-to-Agent endpoint, background poller, browser credential,
 custom Bridge, or cats-company source change belongs in this flow.
 
+### Agent-facing context (final-state-first)
+
+The page exposes `window.catscoArtifact.getContext()` — the OBSERVE/TASK
+context that cloud-html-artifact reads — as a **final-state-first** snapshot:
+the latest final projection/result summary plus stable refs only
+(`semantic_mode: "final-state"`, `state_revision`, `summary`, `filter`,
+`visible_rows`, `agent_notes`, and stable selection/node refs). It never
+contains intermediate event/state history by default. Intermediate events are
+retained for a bounded optional query only
+(`getContext({ include_events: true, max_events: N })`, hard-capped), never
+automatically injected and never required for a task.
+
+The declared task intent (`lesson-report.review-selection.v1`) and result sink
+(`lesson-report.agent-notes.upsert.v1`) and their payload schemas are
+**unchanged**; the Cloud task payload is a bounded ContextBundle projection
+(selections, intent, assessment) and does not carry a final-state summary. The
+final state is read from the page context, not the task envelope. No
+`artifact-manifest.json` field changed — the change is to the observation
+context semantics, documented here and in the lesson-report Skill reference.
+
 ## Delivered Skill set
 
 | Layer | Package | Ownership |

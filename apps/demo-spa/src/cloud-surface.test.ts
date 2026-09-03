@@ -68,6 +68,30 @@ describe('demo cloud surface helpers', () => {
     expect((bounded.events as unknown[]).length).toBeLessThanOrEqual(3);
   });
 
+  it('normalizes a hostile maxEvents so the opt-in event channel stays bounded', () => {
+    const base = {
+      revision: 2,
+      table: { rows: [{ id: 'r-1', student: 'A', topic: 'Linear', status: 'pending' as const }], filter: { status: 'pending' as const } },
+      visibleRows: [{ id: 'r-1', student: 'A', topic: 'Linear', status: 'pending' as const }],
+      selections: [],
+      notes: [],
+    };
+    const events = Array.from({ length: 20 }, (_, index) => ({
+      seq: index + 1,
+      type: 'capability.executed',
+      actor_id: 'agent_440',
+      summary: `event ${index + 1}`,
+    }));
+    // 0 (and negatives) => no events. slice(-0) would otherwise return the whole list.
+    expect('events' in buildSemanticContext({ ...base, includeEvents: true, events, maxEvents: 0 })).toBe(false);
+    expect('events' in buildSemanticContext({ ...base, includeEvents: true, events, maxEvents: -3 })).toBe(false);
+    // huge / non-finite / non-integer => hard-capped at the default, never unbounded.
+    for (const maxEvents of [1000, Infinity, Number.NaN, 3.7]) {
+      const ctx = buildSemanticContext({ ...base, includeEvents: true, events, maxEvents });
+      expect((ctx.events as unknown[]).length).toBeLessThanOrEqual(5);
+    }
+  });
+
   it('keeps a large page-authored snapshot below the bridge semantic limit', () => {
     const rows = Array.from({ length: 100 }, (_, index) => ({
       id: `r-${index}`,

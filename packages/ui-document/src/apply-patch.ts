@@ -1,16 +1,19 @@
 import type { Catalog, UiDocument, UiNode, UiNodeUpdate, UiPatchOp } from './types.js';
 import { UI_DOCUMENT_PATCH_CONTRACT_VERSION } from './types.js';
-import { validateDocument, validateNode, UiDocumentError } from './validate.js';
-import { CATALOG as catalogDef, catalogComponent } from './catalog.js';
+import { validateDocument, validateNode } from './validate.js';
+import { CATALOG as catalogDef } from './catalog.js';
 
 /**
  * Validated patch application for the UI-document contract.
  *
  * A builder may propose a patch; this module validates every op against the
- * catalog allowlists and a base document revision before producing a new
- * document. The V1 boundary is draft-only: patches are validated and applied to
- * the in-memory document (a local builder surface), never written into a
- * production manifest or task/result contract.
+ * *cumulative* document as it applies and runs `validateDocument` on the final
+ * result. The whole patch is atomic: if any op would make the resulting
+ * document invalid — whether a duplicate node/region id or an invalid
+ * cross-op outcome — the entire patch is rejected with `invalid_patch` and the
+ * source document is never mutated. The V1 boundary is draft-only: patches are
+ * validated and applied to the in-memory document (a local builder surface),
+ * never written into a production manifest or task/result contract.
  */
 
 export type PatchResult =
@@ -21,51 +24,44 @@ function cloneNode(node: UiNode): UiNode {
   return JSON.parse(JSON.stringify(node)) as UiNode;
 }
 
-/** Validate a single op in isolation, returning errors for the offending node. */
-function validateOp(op: UiPatchOp, document: UiDocument, catalog: Catalog): string[] {
-  if (op.op === 'insert') {
-    if (!Number.isInteger(op.index) || op.index < 0 || op.index > document.nodes.length) {
-      return ['insert index is out of range'];
-    }
-    return validateNode(op.node, catalog);
-  }
-  if (op.op === 'update') {
-    const target = document.nodes.find((node) => node.id === op.id);
-    if (!target) return [`update: node "${op.id}" does not exist`];
-    const def = catalogComponent(target.kind);
-    if (!def) return [`update: node "${op.id}" has an unknown catalog kind "${target.kind}"`];
-    const errors: string[] = [];
-    // Allowlist enforcement for the update fields, matching validate.ts checks.
-    if (op.update !== undefined && op.update !== null && typeof op.update !== 'object') {
-      return ['update must be an object'];
-    }
-    const update = op.update ?? {};
-    const allowedProps = new Set(Object.keys(def.props));
-    const newProps = { ...(target.props ?? {}) , ...(update.props ?? {}) };
-    for (const key of Object.keys(update.props ?? {})) {
-      if (!allowedProps.has(key)) errors.push(`update: unknown prop "${key}" is not allowed for ${target.kind}`);
-    }
-    const allowedBindings = new Set(Object.keys(def.bindings));
-    for (const key of Object.keys(update.bindings ?? {})) {
-      if (!allowedBindings.has(key)) errors.push(`update: unknown binding "${key}" is not allowed for ${target.kind}`);
-    }
-    const allowedEvents = Object.keys(def.events);
-    for (const key of Object.keys(update.events ?? {})) {
-      if (!allowedEvents.includes(key)) errors.push(`update: unknown event "${key}" is not allowed for ${target.kind}`);
-    }
-    // Re-validate the merged node to catch value-level / executable / path issues.
-    const candidate = { ...target, props: newProps, bindings: { ...(target.bindings ?? {}), ...(update.bindings ?? {}) }, events: { ...(target.events ?? {}), ...(update.events ?? {}) } };
-    errors.push(...validateNode(candidate, catalog));
-    return errors;
-  }
-  if (op.op === 'remove') {
-    if (!document.nodes.some((node) => node.id === op.id)) return [`remove: node "${op.id}" does not exist`];
-    return [];
-  }
-  return [`unknown patch op`];
+/** Envelope-only checks: shape, target document, base revision, operations. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
-export function validatePatch(patch: unknown, document: UiDocument, catalog: Catalog = catalogDef): string[] {
+/** Validate a single op's discriminant and its expected field shapes. */
+function validateOpShape(op: unknown): string[] {
+  if (!isPlainObject(op)) return ['each op must be a non-null plain object'];
+  const discriminant = op.op;
+  if (discriminant !== 'insert' && discriminant !== 'update' && discriminant !== 'remove') {
+    return ['op.op must be one of insert/update/remove'];
+  }
+  if (discriminant === 'insert') {
+    if (typeof op.index !== 'number' || !Number.isInteger(op.index)) return ['insert op.index must be an integer'];
+    if (!isPlainObject(op.node)) return ['insert op requires a node object'];
+    if (typeof op.node.id !== 'string' || op.node.id === '') return ['insert node.id must be a non-empty string'];
+    if (typeof op.node.kind !== 'string' || op.node.kind === '') return ['insert node.kind must be a non-empty string'];
+    return [];
+  }
+  if (discriminant === 'update') {
+    if (typeof op.id !== 'string' || op.id === '') return ['update op requires a non-empty node id'];
+    if (op.update !== undefined) {
+      if (!isPlainObject(op.update)) return ['update op.update must be an object'];
+      for (const field of ['props', 'bindings', 'events'] as const) {
+        if (op.update[field] !== undefined && !isPlainObject(op.update[field])) {
+          return [`update op.update.${field} must be an object`];
+        }
+      }
+    }
+    return [];
+  }
+  if (typeof op.id !== 'string' || op.id === '') return ['remove op requires a non-empty node id'];
+  return [];
+}
+
+function validatePatchShape(patch: unknown, document: UiDocument): string[] {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return ['patch must be an object'];
   const p = patch as { contract_version: unknown; document_id: unknown; base_revision: unknown; ops: unknown };
   if (p.contract_version !== UI_DOCUMENT_PATCH_CONTRACT_VERSION) {
@@ -80,23 +76,74 @@ export function validatePatch(patch: unknown, document: UiDocument, catalog: Cat
   if (!Array.isArray(p.ops) || p.ops.length === 0) {
     return ['patch.ops must be a non-empty array'];
   }
-  const errors: string[] = [];
-  for (const op of p.ops) {
-    errors.push(...validateOp(op, document, catalog));
+  for (const op of p.ops as unknown[]) {
+    const opErrors = validateOpShape(op);
+    if (opErrors.length > 0) return opErrors;
   }
-  return errors;
+  return [];
 }
 
-/**
- * Apply a validated patch to a document, producing a new document at
- * `revision + 1`. The original is not mutated.
- */
-export function applyPatch(document: UiDocument, patch: unknown, catalog: Catalog = catalogDef): PatchResult {
-  const errors = validatePatch(patch, document, catalog);
-  if (errors.length > 0) return { ok: false, code: 'invalid_patch', message: errors[0]! };
-  const p = patch as { ops: UiPatchOp[] };  let nodes = document.nodes.map(cloneNode);
+/** Validate one op against the *current* (cumulative) working nodes. */
+function validateOp(op: UiPatchOp, nodes: UiNode[], catalog: Catalog): string[] {
+  if (op.op === 'insert') {
+    if (!Number.isInteger(op.index) || op.index < 0 || op.index > nodes.length) {
+      return ['insert index is out of range'];
+    }
+    if (nodes.some((n) => n.id === op.node.id)) {
+      return [`insert: node id "${op.node.id}" already exists in the document`];
+    }
+    return validateNode(op.node, catalog);
+  }
+  if (op.op === 'update') {
+    const target = nodes.find((node) => node.id === op.id);
+    if (!target) return [`update: node "${op.id}" does not exist`];
+    const def = catalog[target.kind];
+    if (!def) return [`update: node "${op.id}" has an unknown catalog kind "${target.kind}"`];
+    if (op.update !== undefined && op.update !== null && typeof op.update !== 'object') {
+      return ['update must be an object'];
+    }
+    const errors: string[] = [];
+    const update = op.update ?? {};
+    const allowedProps = new Set(Object.keys(def.props));
+    for (const key of Object.keys(update.props ?? {})) {
+      if (!allowedProps.has(key)) errors.push(`update: unknown prop "${key}" is not allowed for ${target.kind}`);
+    }
+    const allowedBindings = new Set(Object.keys(def.bindings));
+    for (const key of Object.keys(update.bindings ?? {})) {
+      if (!allowedBindings.has(key)) errors.push(`update: unknown binding "${key}" is not allowed for ${target.kind}`);
+    }
+    const allowedEvents = Object.keys(def.events);
+    for (const key of Object.keys(update.events ?? {})) {
+      if (!allowedEvents.includes(key)) errors.push(`update: unknown event "${key}" is not allowed for ${target.kind}`);
+    }
+    // Re-validate the merged node to catch value-level / executable / path issues.
+    const candidate: UiNode = {
+      ...target,
+      props: { ...(target.props ?? {}), ...(update.props ?? {}) },
+      bindings: { ...(target.bindings ?? {}), ...(update.bindings ?? {}) },
+      events: { ...(target.events ?? {}), ...(update.events ?? {}) },
+    };
+    errors.push(...validateNode(candidate, catalog));
+    return errors;
+  }
+  if (op.op === 'remove') {
+    if (!nodes.some((node) => node.id === op.id)) return [`remove: node "${op.id}" does not exist`];
+    return [];
+  }
+  return ['unknown patch op'];
+}
+
+/** Apply a patch against a cloned working copy, validating at each step and at the cumulative boundary. */
+function simulateApply(
+  document: UiDocument,
+  ops: UiPatchOp[],
+  catalog: Catalog,
+): { nodes: UiNode[]; applied: number; errors: string[] } {
+  let nodes = document.nodes.map(cloneNode);
   let applied = 0;
-  for (const op of p.ops) {
+  for (const op of ops) {
+    const opErrors = validateOp(op, nodes, catalog);
+    if (opErrors.length > 0) return { nodes, applied, errors: opErrors };
     if (op.op === 'insert') {
       nodes = [...nodes.slice(0, op.index), cloneNode(op.node), ...nodes.slice(op.index)];
       applied += 1;
@@ -118,11 +165,30 @@ export function applyPatch(document: UiDocument, patch: unknown, catalog: Catalo
     }
   }
   const next: UiDocument = { ...document, revision: document.revision + 1, nodes };
-  try {
-    validateDocument(next, catalog);
-  } catch (error) {
-    const message = error instanceof UiDocumentError ? error.message : error instanceof Error ? error.message : String(error);
-    return { ok: false, code: 'invalid_patch', message };
-  }
-  return { ok: true, document: next, applied };
+  // The cumulative result must itself be a valid document (no duplicate node or
+  // region ids, no invalid cross-op outcome). These errors were previously lost.
+  const docErrors = validateDocument(next, catalog);
+  return { nodes, applied, errors: docErrors };
+}
+
+/** Read-only validation; a patch is valid iff it applies cleanly to a cumulative result. */
+export function validatePatch(patch: unknown, document: UiDocument, catalog: Catalog = catalogDef): string[] {
+  const shapeErrors = validatePatchShape(patch, document);
+  if (shapeErrors.length > 0) return shapeErrors;
+  const ops = (patch as { ops: UiPatchOp[] }).ops;
+  return simulateApply(document, ops, catalog).errors;
+}
+
+/**
+ * Apply a validated patch atomically, producing a new document at
+ * `revision + 1`. The original is never mutated; on any cumulative invalid
+ * outcome the patch is rejected with `invalid_patch`.
+ */
+export function applyPatch(document: UiDocument, patch: unknown, catalog: Catalog = catalogDef): PatchResult {
+  const shapeErrors = validatePatchShape(patch, document);
+  if (shapeErrors.length > 0) return { ok: false, code: 'invalid_patch', message: shapeErrors[0]! };
+  const ops = (patch as { ops: UiPatchOp[] }).ops;
+  const { nodes, applied, errors } = simulateApply(document, ops, catalog);
+  if (errors.length > 0) return { ok: false, code: 'invalid_patch', message: errors[0]! };
+  return { ok: true, document: { ...document, revision: document.revision + 1, nodes }, applied };
 }

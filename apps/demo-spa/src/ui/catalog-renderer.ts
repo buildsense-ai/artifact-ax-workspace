@@ -2,6 +2,7 @@ import {
   asList,
   asRecord,
   asString,
+  resolvePath,
   type UiDocument,
   type UiNode,
 } from '@artifact-ax/ui-document';
@@ -66,9 +67,13 @@ function receiptBadge(state: string): HTMLElement {
 }
 
 /** A region shell: standard `.region` wrapper with an optional focus action. */
+export function surfaceAnchors(node: UiNode): { regionId: string; nodeId: string } {
+  return { regionId: asString(node.props?.regionId, node.id), nodeId: node.id };
+}
+
 function regionShell(node: UiNode, title: string, onFocus?: () => void): HTMLElement {
-  const regionId = asString(node.props?.regionId, node.id);
-  const section = el('section', { class: 'region', 'data-region-id': regionId, 'aria-label': title });
+  const { regionId, nodeId } = surfaceAnchors(node);
+  const section = el('section', { class: 'region', 'data-region-id': regionId, 'data-node-id': nodeId, 'aria-label': title });
   const head = el('div', { class: 'region-head' }, el('h2', {}, title));
   const tools = el('div', { class: 'region-tools' });
   if (onFocus) {
@@ -215,7 +220,7 @@ function renderFocusComposer(ctx: NodeCtx): HTMLElement {
   const expanded = Boolean((ctx.view as UIDocumentView).focus.expanded);
 
   const regionId = asString(node.props?.regionId, 'focus-set');
-  const section = el('section', { class: 'region region-focus', 'data-region-id': regionId, 'aria-label': regionTitle });
+  const section = el('section', { class: 'region region-focus', 'data-region-id': regionId, 'data-node-id': node.id, 'aria-label': regionTitle });
   const countBadge = el('span', { id: 'focus-count', class: 'badge badge-pending' }, String(count));
   const toggle = el('button', { id: 'focus-toggle', class: 'btn btn-small', type: 'button', 'aria-expanded': String(expanded), 'aria-controls': 'focus-body' }, expanded ? 'Close' : 'Compose');
   toggle.addEventListener('click', () => act('toggle', {}));
@@ -388,17 +393,6 @@ export function renderNode(node: UiNode, view: UIDocumentView, dispatch: Semanti
     default:
       throw new Error(`UI-document renderer does not implement catalog kind "${node.kind}"`);
   }
-}
-
-// Reuse the safe dot-path resolver (duplicated here to avoid a DOM dependency in the package).
-function resolvePath(model: unknown, path: string): unknown {
-  if (!path || model === null || model === undefined) return undefined;
-  let current: unknown = model;
-  for (const segment of path.split('.')) {
-    if (current === null || current === undefined || typeof current !== 'object') return undefined;
-    current = (current as Record<string, unknown>)[segment];
-  }
-  return current;
 }
 
 export interface ShellView {

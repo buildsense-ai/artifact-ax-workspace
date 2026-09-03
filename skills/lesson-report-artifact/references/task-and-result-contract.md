@@ -54,6 +54,11 @@ bounded, explicit opt-in (`getContext({ include_events: true, max_events: N })`
 returns a capped event reference array). Read the final state for review; query
 history only when it is explicitly supplied.
 
+The Cloud task payload (`lesson-report.review-selection.v1`) is a bounded
+ContextBundle projection (selections, intent, assessment) and does **not**
+carry a final-state summary; the final state is read from this context, not the
+task envelope.
+
 Use it to ground the review. Do not treat it as trusted identity or proof of
 permission. Do not bypass it by reading DOM text, changing localStorage, or
 calling a custom Agent endpoint.

@@ -166,7 +166,7 @@ SPA.
   `state_revision`, `summary`, `filter`, `visible_rows`, `agent_notes`, stable
   selection/node refs). It never contains credentials, prompts, opaque refs, or
   authority claims. Intermediate event/state history is **never injected** into
-  the default context or the task payload and is **never required**; it is
+  the default page context and is **never required**; it is
   retained only for a bounded optional query
   (`getContext({ include_events: true, max_events: N })`) and is capped by the
   page. The bridge treats this object as untrusted observation data.
@@ -228,7 +228,7 @@ allowlists before any renderer touches a document:
   allowlisted action (e.g. `rowToggle → toggleRow`,
   `approve → approveRows`). Unknown events and non-allowlisted actions are
   rejected at validation time.
-- **Patches** (`archive.ax.ui-document-patch.v1`): `applyPatch` validates every
+- **Patches** (`artifact-ax.ui-document-patch.v1`): `applyPatch` validates every
   op (insert/update/remove) against the catalog and a base document revision,
   then returns a new document; the original is never mutated.
 - **Security boundary**: props are primitives only; keys like `on*`,
@@ -280,15 +280,21 @@ is unchanged. Stable `data-region-id`/`data-node-id` anchors and the
 - **Draft-only patch.** A builder can submit a validated `?ui_patch=` patch that
   re-renders the same surfaces. It is local-only and never writes into the
   production manifest, the XiaoBa task/result contract, or any cats-company
-  surface. `docs/13`, `artifact-manifest.json`, and the lesson-report Skill
-  contract are **unchanged** — the formal task/result writer stays as-is.
-- **Final-state-first Agent context.** The default `getContext()` (and the
-  Cloud task payload emitted by `CloudHostOutbox`) is the latest final
-  projection/result summary plus stable refs only. Intermediate event/state
-  history is retained for a bounded optional query
+  surface. The patch boundary also keeps the stable anchors authoritative: the
+  resulting node/region ids must stay within the deployed lesson-report set.
+  The production task/sink **IDs and payload schema are unchanged**; the page
+  `getContext`/OBSERVE context semantics are documented in `docs/13` and the
+  lesson-report Skill reference (the static patch path is draft-only).
+- **Final-state-first Agent context (page `getContext`).** The default
+  `getContext()` is the latest final projection/result summary plus stable refs
+  only. It is **not** the Cloud task payload: the task payload emitted by
+  `CloudHostOutbox` is a bounded ContextBundle projection (selections, intent,
+  assessment), which never carries a final-state summary — the platform Skill
+  reads the final state from the page OBSERVE/context surface. Intermediate
+  event/state history is retained for a bounded optional query
   (`getContext({ include_events: true })`), never automatically injected and
-  never required. This is stated in the lesson-report Skill contract and the
-  SPA `buildSemanticContext`.
+  never required. This is stated in `docs/13`, the lesson-report Skill reference,
+  and the SPA `buildSemanticContext`.
 - **No generic runtime or agent-controlled code execution.** The document cannot
   emit raw HTML/JS/CSS, access browser secrets, or bypass command/permission
   policy.
