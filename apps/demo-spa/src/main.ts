@@ -56,12 +56,15 @@ import { applyUiDocumentPatch, readDraftPatchParam } from './ui/ui-draft.js';
 import {
   CLOUD_UI_RESULT_SINK_ID,
   CLOUD_UI_TASK_INTENT_ID,
+  UI_ACTIVE_DOCUMENT_STORAGE_KEY,
   UI_PATCH_RESULT_SCHEMA,
   UI_PROPOSAL_STORAGE_KEY,
   UiProposalManager,
+  activeDocumentStorageKey,
   buildUiComposeBundle,
   buildUiComposePayload,
   buildUiDocumentMeta,
+  loadActiveDocument,
   loadUiProposals,
   uiProposalStorageKey,
   type UiProposalRecord,
@@ -223,6 +226,7 @@ export class DemoApp {
   private uiBuilderStatus = '';
   private uiProposalManager = new UiProposalManager();
   private uiProposalStorageKey: string = UI_PROPOSAL_STORAGE_KEY;
+  private activeDocumentKey: string = UI_ACTIVE_DOCUMENT_STORAGE_KEY;
 
   constructor(
     private readonly gateway: AxGateway,
@@ -268,10 +272,16 @@ export class DemoApp {
       : null;
     this.notesStorageKey = agentNotesStorageKey(config.workspaceId, config.artifactId, config.actor.id);
     this.agentNotes = loadAgentNotes(this.browserStorage(), this.notesStorageKey);
-    this.uiProposalStorageKey = uiProposalStorageKey(config.workspaceId, config.artifactId, config.actor.id);
+    // UI proposals and the active UiDocument are workspace/artifact-scoped (not
+    // actor-scoped). Load the persisted active document first so the view model,
+    // semantic context, and the compose-ui task payload all use it.
+    this.activeDocumentKey = activeDocumentStorageKey(config.workspaceId, config.artifactId);
+    this.uiProposalStorageKey = uiProposalStorageKey(config.workspaceId, config.artifactId);
+    activeDocument = loadActiveDocument(this.browserStorage(), this.activeDocumentKey, LESSON_REPORT_DOCUMENT);
     this.uiProposalManager = new UiProposalManager({
       storage: this.browserStorage(),
       storageKey: this.uiProposalStorageKey,
+      documentStorageKey: this.activeDocumentKey,
       initial: loadUiProposals(this.browserStorage(), this.uiProposalStorageKey),
     });
     this.trigger = new TriggerService({
@@ -390,13 +400,10 @@ export class DemoApp {
     this.agentNotes = loadAgentNotes(this.browserStorage(), this.notesStorageKey);
     this.resultReceipts.clear();
     this.resultFingerprints.clear();
-    // Reset the compose-ui builder to the new actor-scoped browser store.
-    this.uiProposalStorageKey = uiProposalStorageKey(config.workspaceId, config.artifactId, id);
-    this.uiProposalManager = new UiProposalManager({
-      storage: this.browserStorage(),
-      storageKey: this.uiProposalStorageKey,
-      initial: loadUiProposals(this.browserStorage(), this.uiProposalStorageKey),
-    });
+    // Reset the compose-ui builder status. UI proposals and the active
+    // UiDocument are workspace/artifact-scoped (not actor-scoped), so switching
+    // the actor must not re-scope or discard them; browser-local storage is
+    // also explicitly not cross-browser collaboration.
     this.uiBuilderStatus = '';
     void this.refresh();
   }

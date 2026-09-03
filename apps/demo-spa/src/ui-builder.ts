@@ -6,7 +6,7 @@ import {
   type UiDocumentPatch,
   type UiPrimitive,
 } from '@artifact-ax/ui-document';
-import { applyUiDocumentPatch } from './ui/ui-draft.js';
+import { applyUiDocumentPatch, checkUiDocument } from './ui/ui-draft.js';
 
 /**
  * The formal, standalone XiaoBa UI Builder path.
@@ -30,6 +30,7 @@ import { applyUiDocumentPatch } from './ui/ui-draft.js';
 export const CLOUD_UI_TASK_INTENT_ID = 'lesson-report.compose-ui.v1' as const;
 export const CLOUD_UI_RESULT_SINK_ID = 'lesson-report.ui-document-patch.propose.v1' as const;
 export const UI_PROPOSAL_STORAGE_KEY = 'artifact-ax:lesson-report:ui-proposal:v1' as const;
+export const UI_ACTIVE_DOCUMENT_STORAGE_KEY = 'artifact-ax:lesson-report:ui-document:v1' as const;
 export const MAX_UI_PROPOSALS = 10;
 const MAX_UI_PATCH_OPS = 32;
 const MAX_UI_INTENT_LENGTH = 500;
@@ -101,11 +102,23 @@ export const UI_PATCH_RESULT_SCHEMA = {
   },
 } as const;
 
-/** Scope browser-local UI proposals to the logical workspace, Artifact, and actor. */
-export function uiProposalStorageKey(workspaceId: string, artifactId: string, actorId: string): string {
-  return [workspaceId, artifactId, actorId]
+/**
+ * Scope browser-local UI proposals to the logical workspace + Artifact only.
+ * They are deliberately *not* actor-scoped: a proposal and the active document
+ * belong to the Artifact/workspace, not to the acting user. Browser-local storage
+ * is explicitly not cross-browser collaboration.
+ */
+export function uiProposalStorageKey(workspaceId: string, artifactId: string): string {
+  return [workspaceId, artifactId]
     .map((value) => encodeStoragePart(value))
     .reduce((key, part) => `${key}:${part}`, UI_PROPOSAL_STORAGE_KEY);
+}
+
+/** Scope the persisted active UiDocument to the logical workspace + Artifact only. */
+export function activeDocumentStorageKey(workspaceId: string, artifactId: string): string {
+  return [workspaceId, artifactId]
+    .map((value) => encodeStoragePart(value))
+    .reduce((key, part) => `${key}:${part}`, UI_ACTIVE_DOCUMENT_STORAGE_KEY);
 }
 
 /** Compact metadata of the current UI document, used for the task payload. */
@@ -269,12 +282,20 @@ export class UiProposalManager {
   private proposals: UiProposalRecord[];
   private readonly storage?: Storage;
   private readonly storageKey: string;
+  private readonly documentStorageKey: string;
   private readonly receipts = new Map<string, string>();
 
-  constructor(options: { storage?: Storage; storageKey?: string; initial?: readonly UiProposalRecord[] } = {}) {
+  constructor(options: {
+    storage?: Storage;
+    storageKey?: string;
+    /** Workspace/artifact-scoped key for the persisted active UiDocument. */
+    documentStorageKey?: string;
+    initial?: readonly UiProposalRecord[];
+  } = {}) {
     this.proposals = [...(options.initial ?? [])];
     this.storage = options.storage;
     this.storageKey = options.storageKey ?? UI_PROPOSAL_STORAGE_KEY;
+    this.documentStorageKey = options.documentStorageKey ?? UI_ACTIVE_DOCUMENT_STORAGE_KEY;
   }
 
   stage(input: UiProposalStageInput): UiProposalStageResult {
@@ -301,11 +322,14 @@ export class UiProposalManager {
       state: 'staged',
       created_at: new Date().toISOString(),
     };
-    this.proposals = [...supersedePendingProposals(this.proposals), record].slice(-MAX_UI_PROPOSALS);
-    this.receipts.set(input.result_id, fingerprint);
-    if (!saveUiProposals(this.storage, this.proposals, this.storageKey)) {
+    // Persist-before-success: only commit the in-memory + idempotency state after
+    // the staged proposal is durably stored. On failure, roll back completely.
+    const nextRecords = [...supersedePendingProposals(this.proposals), record].slice(-MAX_UI_PROPOSALS);
+    if (!saveUiProposals(this.storage, nextRecords, this.storageKey)) {
       return { ok: false, code: 'storage_failed', message: 'the application could not persist the staged UI proposal' };
     }
+    this.proposals = nextRecords;
+    this.receipts.set(input.result_id, fingerprint);
     return { ok: true, record, receipt: buildUiProposalReceipt(record) };
   }
 
@@ -322,6 +346,11 @@ export class UiProposalManager {
         : result.message;
       this.persist();
       return { ok: false, code: result.code, message: proposal.error, record: proposal };
+    }
+    // Persist-before-report-success: the updated active UiDocument must be
+    // durable before we report applied or leave an in-memory mutation.
+    if (!saveActiveDocument(this.storage, result.document, this.documentStorageKey)) {
+      return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated UI document', record: proposal };
     }
     proposal.state = 'applied';
     proposal.applied_revision = result.document.revision;
@@ -374,6 +403,39 @@ export function supersedePendingProposals(
     }
     return proposal;
   });
+}
+
+/**
+ * Load the persisted active UiDocument, failing closed on malformed or stale
+ * data. A stored document is accepted only when it is a valid UiDocument under
+ * the fixed catalog, carries the expected document id/contract, and stays within
+ * the deployed stable anchors. Otherwise the shipped fallback document is used.
+ */
+export function loadActiveDocument(storage: Storage | undefined, storageKey: string, fallback: UiDocument): UiDocument {
+  if (!storage) return fallback;
+  try {
+    const raw = storage.getItem(storageKey);
+    if (!raw || raw.length > 128 * 1024) return fallback;
+    const parsed: unknown = JSON.parse(raw);
+    if (!isPlainRecord(parsed)) return fallback;
+    // It must be a lesson-report document (same id/contract) and stay in-anchor.
+    if (parsed.id !== fallback.id || parsed.contract_version !== UI_DOCUMENT_CONTRACT_VERSION) return fallback;
+    if (checkUiDocument(parsed as unknown as UiDocument).length > 0) return fallback;
+    return parsed as unknown as UiDocument;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Persist the active UiDocument atomically from the page's point of view. */
+export function saveActiveDocument(storage: Storage | undefined, document: UiDocument, storageKey: string): boolean {
+  if (!storage) return false;
+  try {
+    storage.setItem(storageKey, JSON.stringify(document));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Read persisted UI proposals without allowing malformed storage to brick the SPA. */

@@ -84,11 +84,22 @@ document id, base revision, operation constraints, stable anchors, and closed
 catalog, rejecting raw code/HTML/JS/CSS and malformed/no-op/stale patches, then
 durably stages the proposal in the browser-local store before returning an
 `applied` receipt. The patch is **never** applied merely because it was
-delivered: a later human `Apply` revalidates against the then-current document
-and persists the active document (handling stale conflicts), and a human
-`Discard` removes the staged proposal. Result idempotency is sink-scoped so a
-result id cannot collide across the two sinks. Storage is browser-local unless
-a durable shared host is introduced; no collaboration persistence is assumed.
+delivered: a later human `Apply` revalidates against the then-current document,
+persists the updated active `UiDocument` **before** reporting success (a
+persistence failure is reported as `failed` and leaves no in-memory mutation),
+and a human `Discard` removes the staged proposal. Result idempotency is
+sink-scoped so a result id cannot collide across the two sinks.
+
+Storage scope and honesty: staged proposals **and** the persisted active
+`UiDocument` are keyed by **workspace + Artifact only, never by actor** — a
+proposal belongs to the Artifact, not to the acting user. At startup the page
+reloads the stored active document, and it **fails closed** to the shipped
+document when the stored data is malformed, oversized, carries a different
+document id/contract version, or drifts outside the deployed stable anchors.
+The semantic context and the compose-ui task payload therefore always describe
+the persisted active document. This storage is browser-local by design: it is
+**not** cross-browser or multi-user collaboration, and no shared persistence is
+assumed until a durable shared host is introduced.
 
 The shared `@artifact-ax/contract` package validates v1/v2/v3 manifests,
 bounded JSON Schema, Observation Packets, task statuses, writeback targets, and

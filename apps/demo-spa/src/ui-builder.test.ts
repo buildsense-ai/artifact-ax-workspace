@@ -9,11 +9,14 @@ import {
   CLOUD_UI_RESULT_SINK_ID,
   CLOUD_UI_TASK_INTENT_ID,
   UiProposalManager,
+  activeDocumentStorageKey,
   buildUiComposeBundle,
   buildUiComposePayload,
   buildUiDocumentMeta,
   currentStagedProposal,
+  loadActiveDocument,
   loadUiProposals,
+  saveActiveDocument,
   saveUiProposals,
   summarizeUiPatch,
   supersedePendingProposals,
@@ -38,8 +41,10 @@ function validPatch(over: Partial<UiDocumentPatch> = {}): UiDocumentPatch {
   };
 }
 
-function mockStorage(initial: Record<string, string> = {}): Storage {
+/** A Storage shim; keys listed in `failOnceKeys` throw on their next write. */
+function mockStorage(initial: Record<string, string> = {}, failOnceKeys: readonly string[] = []): Storage {
   const map = new Map<string, string>(Object.entries(initial));
+  const armed = new Set<string>(failOnceKeys);
   return {
     get length() {
       return map.size;
@@ -51,6 +56,10 @@ function mockStorage(initial: Record<string, string> = {}): Storage {
       map.delete(key);
     },
     setItem: (key, value) => {
+      if (armed.has(key)) {
+        armed.delete(key);
+        throw new Error('storage write failed');
+      }
       map.set(key, String(value));
     },
   };
@@ -208,7 +217,7 @@ describe('compose-ui · staged proposal persistence and state transitions', () =
 
   it('persists and reloads staged proposals in a scoped browser store, failing closed on malformed data', () => {
     const storage = mockStorage();
-    const key = uiProposalStorageKey('ws/demo', 'lesson report', 'teacher@example.com');
+    const key = uiProposalStorageKey('ws/demo', 'lesson report');
     const record = staged();
     expect(saveUiProposals(storage, [record], key)).toBe(true);
     expect(key).toMatch(/^artifact-ax:lesson-report:ui-proposal:v1:/);
@@ -244,11 +253,44 @@ describe('compose-ui · staged proposal persistence and state transitions', () =
   it('produces a compact op summary', () => {
     expect(summarizeUiPatch(validPatch())).toBe('1 op: update review-table');
   });
+
+  it('scopes proposals and the active document by workspace + artifact, not by actor', () => {
+    // Actor-independent: switching the acting user must not re-scope the store.
+    expect(uiProposalStorageKey('ws_demo', 'lesson-report')).toBe('artifact-ax:lesson-report:ui-proposal:v1:ws_demo:lesson-report');
+    expect(activeDocumentStorageKey('ws_demo', 'lesson-report')).toBe('artifact-ax:lesson-report:ui-document:v1:ws_demo:lesson-report');
+    expect(uiProposalStorageKey('ws_demo', 'lesson-report')).not.toContain('human_teacher');
+    expect(activeDocumentStorageKey('ws_demo', 'lesson-report')).not.toContain('human_teacher');
+    expect(uiProposalStorageKey('ws_other', 'lesson-report')).not.toBe(uiProposalStorageKey('ws_demo', 'lesson-report'));
+    expect(activeDocumentStorageKey('ws_demo', 'other-artifact')).not.toBe(activeDocumentStorageKey('ws_demo', 'lesson-report'));
+  });
+
+  it('persists the active document and fails closed on malformed, wrong-id, or drifting data', () => {
+    const docKey = activeDocumentStorageKey('ws_demo', 'lesson-report');
+    const applied = applyUiDocumentPatch(LESSON_REPORT_DOCUMENT, validPatch());
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    const storage = mockStorage();
+    expect(saveActiveDocument(storage, applied.document, docKey)).toBe(true);
+    expect(loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT)).toEqual(applied.document);
+    // Fail closed: malformed / wrong-id / drifting / oversized storage falls back.
+    expect(loadActiveDocument(mockStorage({ [docKey]: '{not json' }), docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
+    expect(loadActiveDocument(mockStorage({ [docKey]: JSON.stringify({ not: 'a doc' }) }), docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
+    const wrongId = mockStorage({ [docKey]: JSON.stringify({ ...applied.document, id: 'other.v1' }) });
+    expect(loadActiveDocument(wrongId, docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
+    const wrongContract = mockStorage({ [docKey]: JSON.stringify({ ...applied.document, contract_version: 'artifact-ax.ui-document.v2' }) });
+    expect(loadActiveDocument(wrongContract, docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
+    const drifted = mockStorage({ [docKey]: JSON.stringify({ ...applied.document, nodes: [...applied.document.nodes, { id: 'rogue', kind: 'review-table' }] }) });
+    expect(loadActiveDocument(drifted, docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
+    const oversized = mockStorage({ [docKey]: 'x'.repeat(200 * 1024) });
+    expect(loadActiveDocument(oversized, docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
+    expect(saveActiveDocument(undefined, applied.document, docKey)).toBe(false);
+    expect(loadActiveDocument(undefined, docKey, LESSON_REPORT_DOCUMENT)).toBe(LESSON_REPORT_DOCUMENT);
+  });
 });
 
 describe('compose-ui · UiProposalManager stage/apply/discard + sink-scoped idempotency', () => {
   const storage = () => mockStorage();
-  const manager = (initial?: UiProposalRecord[]) => new UiProposalManager({ storage: storage(), storageKey: uiProposalStorageKey('ws_demo', 'lesson-report', 'human_teacher'), initial });
+  const manager = (initial?: UiProposalRecord[]) => new UiProposalManager({ storage: storage(), storageKey: uiProposalStorageKey('ws_demo', 'lesson-report'), initial });
 
   it('stages a delivered patch durably and re-staging the same result_id is idempotent', () => {
     const mgr = manager();
@@ -327,6 +369,51 @@ describe('compose-ui · UiProposalManager stage/apply/discard + sink-scoped idem
     const malicious = mgr.stage({ result_id: 'arr_'.concat('N'.repeat(43)), payload: validPatch({ ops: [{ op: 'update', id: 'review-table', update: { props: { innerHTML: '<script>x</script>' } } }] }), document: LESSON_REPORT_DOCUMENT });
     expect(malicious.ok).toBe(false);
     expect(mgr.current()).toBeNull();
+  });
+
+  it('rolls back in-memory and idempotency state when staging cannot be persisted, then retries', () => {
+    const proposalKey = uiProposalStorageKey('ws_demo', 'lesson-report');
+    const storage = mockStorage({}, [proposalKey]);
+    const mgr = new UiProposalManager({
+      storage,
+      storageKey: proposalKey,
+      documentStorageKey: activeDocumentStorageKey('ws_demo', 'lesson-report'),
+    });
+    const resultId = 'arr_'.concat('O'.repeat(43));
+    const failed = mgr.stage({ result_id: resultId, payload: validPatch(), document: LESSON_REPORT_DOCUMENT });
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.code).toBe('storage_failed');
+    // Rollback: nothing was committed to memory and the result id is not consumed.
+    expect(mgr.current()).toBeNull();
+    expect(mgr.list()).toEqual([]);
+    const retried = mgr.stage({ result_id: resultId, payload: validPatch(), document: LESSON_REPORT_DOCUMENT });
+    expect(retried.ok).toBe(true);
+    if (!retried.ok) return;
+    expect(retried.record.proposal_id).toBe(resultId);
+    expect(mgr.current()?.state).toBe('staged');
+  });
+
+  it('does not report applied when the active document cannot be persisted, then retries', () => {
+    const proposalKey = uiProposalStorageKey('ws_demo', 'lesson-report');
+    const docKey = activeDocumentStorageKey('ws_demo', 'lesson-report');
+    const storage = mockStorage({}, [docKey]);
+    const mgr = new UiProposalManager({ storage, storageKey: proposalKey, documentStorageKey: docKey });
+    const stage = mgr.stage({ result_id: 'arr_'.concat('P'.repeat(43)), payload: validPatch(), document: LESSON_REPORT_DOCUMENT });
+    expect(stage.ok).toBe(true);
+    const applied = mgr.apply(LESSON_REPORT_DOCUMENT);
+    expect(applied.ok).toBe(false);
+    if (!applied.ok) expect(applied.code).toBe('storage_failed');
+    // Rollback: the proposal is still staged and the base document is unchanged.
+    expect(mgr.current()?.state).toBe('staged');
+    expect(LESSON_REPORT_DOCUMENT.revision).toBe(1);
+    // Retry succeeds now that the one-shot failure is consumed.
+    const retried = mgr.apply(LESSON_REPORT_DOCUMENT);
+    expect(retried.ok).toBe(true);
+    if (retried.ok) {
+      expect(retried.document.revision).toBe(LESSON_REPORT_DOCUMENT.revision + 1);
+      expect(retried.record.state).toBe('applied');
+    }
+    expect(loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT).revision).toBe(LESSON_REPORT_DOCUMENT.revision + 1);
   });
 });
 

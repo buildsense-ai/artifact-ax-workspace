@@ -227,7 +227,7 @@ execution.
 | `ui-draft.ts` + `?ui_patch=`: draft-only (developer) patch application boundary | implemented + unit-tested |
 | `ui-builder` catalog surface: formal compose-ui Builder panel (intent input, request action, staged proposal summary, human apply/discard, status feedback) | implemented + rendered from the validated document, no hard-coded DOM |
 | Formal compose-ui task/sink: `lesson-report.compose-ui.v1` → `lesson-report.ui-document-patch.propose.v1` with a bounded payload (current document/config, app revision/identity, user intent) | implemented + manifest-validated + unit-tested |
-| Sink-scoped idempotency + staged-proposal stage/apply/discard/persistence + no-Host behavior | implemented + unit-tested |
+| Sink-scoped idempotency + staged-proposal stage/apply/discard/persistence + persisted active `UiDocument` (workspace/artifact-scoped, fail-closed reload, persist-before-success) + no-Host behavior | implemented + unit-tested |
 | Stable `data-region-id`/`data-node-id`/`data-artifact-id` anchors, projection + semantic command/event seams, Cloud Host/task/result sink behavior | preserved |
 | React + Vercel json-render + shadcn/Base UI catalog | **not used**: would require converting the framework-free SPA and re-implementing its DOM-coupled transport/bridge/Cloud Host wiring; an equally constrained catalog renderer is used instead (reason documented in README) |
 | Generic, extensible Artifact runtime or agent-controlled UI code | **out of scope**: the catalog is closed and props/bindings/events are allowlisted; no raw HTML/JS/CSS input is accepted |
@@ -251,6 +251,11 @@ execution.
   or discards it (never applied merely because it was delivered).
 - The page `getContext` may expose compact UI-document metadata (`ui_document`)
   as final state; intermediate event/state history remains a bounded opt-in.
+- Staged proposals and the persisted active `UiDocument` are browser-local and
+  keyed by **workspace + Artifact only, never by actor**; the stored document is
+  reloaded at startup and the page fails closed to the shipped document on
+  malformed/wrong-id/anchor-drifting data. Browser-local storage is not
+  cross-browser collaboration.
 - The renderer uses `textContent` for all dynamic text; it never emits untrusted
   text as HTML, never executes a document value, and cannot reach browser
   secrets or bypass command/permission policy.
