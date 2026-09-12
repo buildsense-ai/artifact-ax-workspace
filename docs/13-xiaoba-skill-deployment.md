@@ -76,6 +76,18 @@ malformed/no-op/stale patches) and durably stage the proposal before returning
 the `applied` result receipt. Applying or discarding is a later explicit human
 action in the page; the draft is never applied merely because it was delivered.
 
+The three protected governance surfaces (`review-table`, `approval-list`, and
+`ui-builder`) must retain their deployed component kind, region ID, data bindings,
+and action bindings, not merely their node IDs. The page compares this wiring
+against `apps/demo-spa/src/ui/lesson-report.document.ts`, never against an
+untrusted proposal or stored document. Missing/replaced/redirected wiring is
+rejected with `protected_surface` at application-policy validation; catalog or
+anchor errors may reject an invalid patch earlier. Stored active documents are
+subject to the same invariant. Bounded cosmetic props (titles, hints, empty text)
+and legal placement remain editable. The exact task/sink IDs and the manifest's
+patch envelope are unchanged; see the updated
+`skills/lesson-report-artifact/references/compose-ui-contract.md`.
+
 ## Delivered Skill set
 
 | Layer | Package | Ownership |

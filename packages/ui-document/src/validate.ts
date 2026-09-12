@@ -6,6 +6,7 @@ import type {
   UiNode,
 } from './types.js';
 import { CATALOG as catalogDef } from './catalog.js';
+import { validateNodeStructure } from './patch-structure.js';
 
 /**
  * Validation for the UI-document contract. This is the security-critical
@@ -95,7 +96,7 @@ function validatePropValue(schema: PropSchema, value: unknown, path: string): st
     }
     if (isExecutableText(value)) errors.push(`${path} must not contain executable presentation markup`);
   } else if (schema.type === 'number') {
-    if (typeof value !== 'number' || Number.isNaN(value)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
       errors.push(`${path} must be a number`);
       return errors;
     }
@@ -188,9 +189,11 @@ function validateEvents(node: UiNode, def: CatalogComponent): string[] {
 }
 
 export function validateNode(node: UiNode, catalog: Catalog = catalogDef): string[] {
+  const shapeErrors = validateNodeStructure(node);
+  if (shapeErrors.length > 0) return shapeErrors;
   const errors: string[] = [];
   const def = catalog[node.kind];
-  if (def === undefined) {
+  if (!Object.prototype.hasOwnProperty.call(catalog, node.kind) || def === undefined) {
     return [`node ${node.id}: unknown catalog kind "${node.kind}"`];
   }
   if (!isValidNodeId(node.id)) {
@@ -222,6 +225,8 @@ export function validateNode(node: UiNode, catalog: Catalog = catalogDef): strin
 export function validateDocument(document: UiDocument, catalog: Catalog = catalogDef): string[] {
   const errors: string[] = [];
   if (!isPlainObject(document)) return ['document must be an object'];
+  const allowed = new Set(['contract_version', 'id', 'title', 'revision', 'layout', 'nodes']);
+  if (Object.keys(document).some((key) => !allowed.has(key))) errors.push('document contains an unknown field');
   if (document.contract_version !== 'artifact-ax.ui-document.v1') {
     errors.push(`document.contract_version must be artifact-ax.ui-document.v1`);
   }
@@ -231,10 +236,10 @@ export function validateDocument(document: UiDocument, catalog: Catalog = catalo
   if (document.title !== undefined && (typeof document.title !== 'string' || document.title.length > 64)) {
     errors.push('document.title must be a bounded string');
   }
-  if (!Number.isInteger(document.revision) || document.revision < 0) {
+  if (!Number.isSafeInteger(document.revision) || document.revision < 0) {
     errors.push('document.revision must be a non-negative integer');
   }
-  if (document.layout !== undefined && (document.layout === null || typeof document.layout !== 'object' || document.layout.template !== 'main-side')) {
+  if (document.layout !== undefined && (!isPlainObject(document.layout) || document.layout.template !== 'main-side' || Object.keys(document.layout).some((key) => key !== 'template'))) {
     errors.push('document.layout must be { template: "main-side" }');
   }
   if (!Array.isArray(document.nodes) || document.nodes.length === 0) {
@@ -244,6 +249,11 @@ export function validateDocument(document: UiDocument, catalog: Catalog = catalo
   const nodeIds = new Set<string>();
   const regionIds = new Set<string>();
   for (const node of document.nodes) {
+    const shapeErrors = validateNodeStructure(node);
+    if (shapeErrors.length > 0) {
+      errors.push(...shapeErrors);
+      continue;
+    }
     errors.push(...validateNode(node, catalog));
     if (nodeIds.has(node.id)) errors.push(`duplicate node id ${node.id}`);
     nodeIds.add(node.id);

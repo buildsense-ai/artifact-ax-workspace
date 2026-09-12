@@ -87,24 +87,46 @@ durably stages the proposal in the browser-local store before returning an
 and `ui-builder` — are protected: a proposal containing a `remove` op for any of
 them is rejected with code `protected_surface` and never staged, and the same
 check is applied when a persisted active document is reloaded at startup (a
-stored document missing one fails closed to the shipped document). The patch is
+stored document missing one fails closed to the shipped document). Their deployed
+kind, region ID, data bindings and event/action wiring are also fixed: retaining
+a node ID while replacing its component or redirecting its data is not enough.
+`protectedSurfaceIntegrityErrors()` in `apps/demo-spa/src/ui/ui-draft.ts` checks
+against the shipped document, both after patch application and at document
+validation/load/save. Bounded text props and legal placement remain editable.
+The patch is
 **never** applied merely because it was delivered: a later human `Apply`
 revalidates against the then-current document and persists the updated active
-`UiDocument` **before** reporting success. Apply and discard are transactional:
-if either persistence step (document, or proposal metadata) fails, the
-operation fails with code `storage_failed` and a visible status message, the
-prior proposal state is restored, and no in-memory mutation is left; the
-document and proposal stores never silently diverge. Staging never retains the
-delivered payload object: the patch is canonicalized (deep-cloned with sorted
+`UiDocument` **before** reporting success. Proposal state changes are committed
+in memory only after proposal persistence succeeds. These are **not atomic
+cross-key transactions**: apply writes the document first, then proposal
+metadata. If either write fails, the operation reports `storage_failed` and
+keeps the prior in-memory proposal. If only the metadata write fails, the
+stored document is already new while the proposal remains staged. Retrying
+against the old in-memory base can converge; after reload, apply rejects the
+old patch against the newer document and marks it stale for discard/re-request.
+Staging never retains the delivered payload object: the patch is canonicalized (deep-cloned with sorted
 keys) after validation, so idempotency fingerprints and stored records are
 independent of caller identity/property order, and an unknown patch envelope
-field is rejected. Reloaded proposals fail closed too: `loadUiProposals`
-validates the patch contract/envelope and op shapes, bounds the serialized
-patch, summary, error, and timestamp fields, and rejects executable or unknown
-content; full catalog/anchor/stale revalidation still happens at apply time
-against the then-current document.
-Result idempotency is sink-scoped so a result id cannot collide across the two
-sinks.
+field is rejected. All public Manager record results are detached snapshots,
+including storage-failure results; constructor input is detached too.
+
+Staging, reload, and apply share the closed structural validator in
+`packages/ui-document/src/patch-structure.ts` (1–32 ops, at most 8,192 serialized
+UTF-16 characters, known envelope/op/node fields, primitive props and string
+bindings/events). Full catalog/anchor/current-document validation remains at
+apply, not at storage reload. `loadUiProposals` also checks record/patch identity
+and revision agreement, derived summary and op count, state/metadata consistency,
+and bounded summary/error/timestamp fields. Executable summary/error text is
+rejected. The retained record window is rejected on malformed records or
+repeated proposal IDs rather than filtering them and potentially reactivating
+older proposals.
+
+Only the latest proposal can be actionable. Once it is applied/discarded, older
+superseded records remain history. A stale proposal can be discarded or replaced
+by a new request, never applied again. Exact result redelivery replays the
+stored receipt even after the document advances; it does not apply again or
+reactivate history. Result idempotency is sink-scoped so a result id cannot
+collide across the two sinks.
 
 Storage scope and honesty: staged proposals **and** the persisted active
 `UiDocument` are keyed by **workspace + Artifact only, never by actor** — a
@@ -112,8 +134,10 @@ proposal belongs to the Artifact, not to the acting user. At startup the page
 reloads the stored active document, and it **fails closed** to the shipped
 document when the stored data is malformed, oversized, carries a different
 document id/contract version, or drifts outside the deployed stable anchors.
-The semantic context and the compose-ui task payload therefore always describe
-the persisted active document. This storage is browser-local by design: it is
+The semantic context and compose-ui task payload describe the active in-memory
+document, initialized from the validated stored document or the shipped fallback.
+They can lag the document key during the reported metadata-write failure above.
+This storage is browser-local by design: it is
 **not** cross-browser or multi-user collaboration, and no shared persistence is
 assumed until a durable shared host is introduced.
 

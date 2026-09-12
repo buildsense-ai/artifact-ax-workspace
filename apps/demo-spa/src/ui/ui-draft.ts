@@ -53,6 +53,18 @@ export function anchorDriftErrors(document: UiDocument): string[] {
  */
 export const PROTECTED_NODE_IDS: readonly string[] = ['review-table', 'approval-list', 'ui-builder'];
 
+// Private snapshots of the shipped application wiring, never derived from the
+// untrusted base/stored document. Text and placement are deliberately not pinned.
+const PROTECTED_SURFACES = LESSON_REPORT_DOCUMENT.nodes
+  .filter((node) => PROTECTED_NODE_IDS.includes(node.id))
+  .map((node) => ({
+    id: node.id,
+    kind: node.kind,
+    regionId: node.props?.regionId,
+    bindings: { ...node.bindings },
+    events: { ...node.events },
+  }));
+
 /** Protected node ids missing from a document (empty means all retained). */
 export function missingProtectedNodes(document: UiDocument): string[] {
   const present = new Set(document.nodes.map((node) => node.id));
@@ -85,6 +97,8 @@ export function applyUiDocumentPatch(base: UiDocument, patch: unknown): DraftApp
   if (!result.ok) return result;
   const drift = anchorDriftErrors(result.document);
   if (drift.length > 0) return { ok: false, code: 'anchor_drift', message: drift[0]! };
+  const protectedErrorsAfterApply = protectedSurfaceIntegrityErrors(result.document);
+  if (protectedErrorsAfterApply.length > 0) return { ok: false, code: 'protected_surface', message: protectedErrorsAfterApply[0]! };
   return result;
 }
 
@@ -96,16 +110,37 @@ export function missingProtectedNodeErrors(document: UiDocument): string[] {
 }
 
 /**
+ * Existence alone is insufficient: required application wiring must still reach
+ * the real review/approval/Builder state and human actions. Call after structural
+ * validation. This application policy does not belong in the generic catalog.
+ */
+export function protectedSurfaceIntegrityErrors(document: UiDocument): string[] {
+  const errors = missingProtectedNodeErrors(document);
+  for (const expected of PROTECTED_SURFACES) {
+    const node = document.nodes.find((candidate) => candidate.id === expected.id);
+    if (!node) continue;
+    const prefix = `node "${expected.id}" is a protected governance surface`;
+    if (node.kind !== expected.kind) errors.push(`${prefix} and must keep kind "${expected.kind}"`);
+    if (node.props?.regionId !== expected.regionId) errors.push(`${prefix} and must keep its deployed region id`);
+    for (const field of ['bindings', 'events'] as const) {
+      for (const [name, value] of Object.entries(expected[field])) {
+        if (node[field]?.[name] !== value) errors.push(`${prefix} and must retain ${field}.${name}`);
+      }
+    }
+  }
+  return errors;
+}
+
+/**
  * Validate a proposed or stored document (validator + anchor drift + the
  * protected-surface invariant, so no deployable document can omit
  * review-table, approval-list, or ui-builder).
  */
 export function checkUiDocument(document: UiDocument): string[] {
-  return [
-    ...validateDocument(document),
-    ...anchorDriftErrors(document),
-    ...missingProtectedNodeErrors(document),
-  ];
+  // Stop before application-policy traversal when the structural input is bad.
+  const errors = validateDocument(document);
+  if (errors.length > 0) return errors;
+  return [...anchorDriftErrors(document), ...protectedSurfaceIntegrityErrors(document)];
 }
 
 /** Read a draft patch from the `?ui_patch=<urlencoded JSON>` query, if present. */

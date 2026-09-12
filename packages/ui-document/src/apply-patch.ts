@@ -1,5 +1,5 @@
 import type { Catalog, UiDocument, UiNode, UiNodeUpdate, UiPatchOp } from './types.js';
-import { UI_DOCUMENT_PATCH_CONTRACT_VERSION } from './types.js';
+import { validatePatchStructure } from './patch-structure.js';
 import { validateDocument, validateNode } from './validate.js';
 import { CATALOG as catalogDef } from './catalog.js';
 
@@ -24,70 +24,11 @@ function cloneNode(node: UiNode): UiNode {
   return JSON.parse(JSON.stringify(node)) as UiNode;
 }
 
-/** Envelope-only checks: shape, target document, base revision, operations. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-}
-
-/** Validate a single op's discriminant and its expected field shapes. */
-function validateOpShape(op: unknown): string[] {
-  if (!isPlainObject(op)) return ['each op must be a non-null plain object'];
-  const discriminant = op.op;
-  if (discriminant !== 'insert' && discriminant !== 'update' && discriminant !== 'remove') {
-    return ['op.op must be one of insert/update/remove'];
-  }
-  if (discriminant === 'insert') {
-    if (typeof op.index !== 'number' || !Number.isInteger(op.index)) return ['insert op.index must be an integer'];
-    if (!isPlainObject(op.node)) return ['insert op requires a node object'];
-    if (typeof op.node.id !== 'string' || op.node.id === '') return ['insert node.id must be a non-empty string'];
-    if (typeof op.node.kind !== 'string' || op.node.kind === '') return ['insert node.kind must be a non-empty string'];
-    return [];
-  }
-  if (discriminant === 'update') {
-    if (typeof op.id !== 'string' || op.id === '') return ['update op requires a non-empty node id'];
-    if (!isPlainObject(op.update)) return ['update op requires an update object'];
-    const allowedFields = new Set(['props', 'bindings', 'events']);
-    const keys = Object.keys(op.update);
-    for (const key of keys) {
-      if (!allowedFields.has(key)) return [`update op.update contains an unknown field "${key}"`];
-    }
-    if (keys.length === 0) return ['update op.update is empty; provide at least one of props/bindings/events'];
-    let hasChange = false;
-    for (const field of ['props', 'bindings', 'events'] as const) {
-      const value = op.update[field];
-      if (value !== undefined) {
-        if (!isPlainObject(value)) return [`update op.update.${field} must be an object`];
-        if (Object.keys(value).length > 0) hasChange = true;
-      }
-    }
-    if (!hasChange) return ['update op must change at least one of props/bindings/events; no-op updates are rejected'];
-    return [];
-  }
-  if (typeof op.id !== 'string' || op.id === '') return ['remove op requires a non-empty node id'];
-  return [];
-}
-
 function validatePatchShape(patch: unknown, document: UiDocument): string[] {
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return ['patch must be an object'];
-  const p = patch as { contract_version: unknown; document_id: unknown; base_revision: unknown; ops: unknown };
-  if (p.contract_version !== UI_DOCUMENT_PATCH_CONTRACT_VERSION) {
-    return [`patch.contract_version must be ${UI_DOCUMENT_PATCH_CONTRACT_VERSION}`];
-  }
-  if (typeof p.document_id !== 'string' || p.document_id !== document.id) {
-    return ['patch.document_id must match the target document id'];
-  }
-  if (p.base_revision !== document.revision) {
-    return [`patch.base_revision ${String(p.base_revision)} does not match document revision ${document.revision}`];
-  }
-  if (!Array.isArray(p.ops) || p.ops.length === 0) {
-    return ['patch.ops must be a non-empty array'];
-  }
-  for (const op of p.ops as unknown[]) {
-    const opErrors = validateOpShape(op);
-    if (opErrors.length > 0) return opErrors;
-  }
+  const structureErrors = validatePatchStructure(patch);
+  if (structureErrors.length > 0) return structureErrors;
+  if ((patch as { document_id: string }).document_id !== document.id) return ['patch.document_id must match the target document id'];
+  if ((patch as { base_revision: number }).base_revision !== document.revision) return [`patch.base_revision ${(patch as { base_revision: number }).base_revision} does not match document revision ${document.revision}`];
   return [];
 }
 

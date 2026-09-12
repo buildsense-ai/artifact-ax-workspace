@@ -3,6 +3,8 @@ import {
   isExecutableText,
   UI_DOCUMENT_CONTRACT_VERSION,
   UI_DOCUMENT_PATCH_CONTRACT_VERSION,
+  UI_DOCUMENT_PATCH_MAX_OPS,
+  validatePatchStructure,
   type UiDocument,
   type UiDocumentPatch,
   type UiPrimitive,
@@ -33,16 +35,11 @@ export const CLOUD_UI_RESULT_SINK_ID = 'lesson-report.ui-document-patch.propose.
 export const UI_PROPOSAL_STORAGE_KEY = 'artifact-ax:lesson-report:ui-proposal:v1' as const;
 export const UI_ACTIVE_DOCUMENT_STORAGE_KEY = 'artifact-ax:lesson-report:ui-document:v1' as const;
 export const MAX_UI_PROPOSALS = 10;
-const MAX_UI_PATCH_OPS = 32;
+const MAX_UI_PATCH_OPS = UI_DOCUMENT_PATCH_MAX_OPS;
 const MAX_UI_INTENT_LENGTH = 500;
 const MAX_STORED_SUMMARY_CHARS = 2_000;
 const MAX_STORED_MESSAGE_CHARS = 500;
 const MAX_STORED_TIMESTAMP_CHARS = 64;
-const MAX_STORED_PATCH_CHARS = 8_192;
-const INSERT_OP_KEYS = new Set(['op', 'index', 'node']);
-const UPDATE_OP_KEYS = new Set(['op', 'id', 'update']);
-const REMOVE_OP_KEYS = new Set(['op', 'id']);
-const UPDATE_FIELDS = new Set(['props', 'bindings', 'events']);
 
 /** A staged (or applied/discarded) UI-document patch proposal. */
 export interface UiProposalRecord {
@@ -58,6 +55,16 @@ export interface UiProposalRecord {
   applied_at?: string;
   discarded_at?: string;
   error?: string;
+}
+
+/** Delivery can be a replay of a terminal receipt, not necessarily a new draft. */
+export function uiProposalDeliveryStatus(record: UiProposalRecord): string {
+  switch (record.state) {
+    case 'staged': return `Staged ${record.summary}; review and apply or discard it.`;
+    case 'stale': return `Stale ${record.summary}; re-request or discard it.`;
+    case 'applied': return `Already applied ${record.summary}; no new proposal was staged.`;
+    case 'discarded': return `Already discarded ${record.summary}; no new proposal was staged.`;
+  }
 }
 
 /** The bounded compose-ui task payload (what the Agent receives). */
@@ -211,27 +218,17 @@ export type UiPatchProposalValidation =
  */
 export function validateUiDocumentPatchProposal(payload: unknown, document: UiDocument): UiPatchProposalValidation {
   if (!isPlainRecord(payload)) return invalid('invalid_patch', 'patch proposal must be an object');
-  const envelopeKeys = new Set(['contract_version', 'document_id', 'base_revision', 'ops']);
-  if (Object.keys(payload).some((key) => !envelopeKeys.has(key))) {
-    return invalid('invalid_patch', 'patch proposal contains an unsupported field');
-  }
-  if (payload.contract_version !== UI_DOCUMENT_PATCH_CONTRACT_VERSION) {
-    return invalid('invalid_patch', `patch.contract_version must be ${UI_DOCUMENT_PATCH_CONTRACT_VERSION}`);
-  }
-  if (typeof payload.document_id !== 'string' || payload.document_id !== document.id) {
+  const structureErrors = validatePatchStructure(payload);
+  if (structureErrors.length > 0) return invalid('invalid_patch', structureErrors[0]!);
+  if (payload.document_id !== document.id) {
     return invalid('invalid_patch', 'patch.document_id must match the target document id');
   }
   if (payload.base_revision !== document.revision) {
     return invalid('stale_patch', `patch.base_revision ${String(payload.base_revision)} does not match current document revision ${document.revision}`);
   }
-  if (!Array.isArray(payload.ops) || payload.ops.length === 0) {
-    return invalid('invalid_patch', 'patch.ops must be a non-empty array');
-  }
-  if (payload.ops.length > MAX_UI_PATCH_OPS) {
-    return invalid('invalid_patch', `patch.ops must have at most ${MAX_UI_PATCH_OPS} operations`);
-  }
-  // Delegate the exact catalog/op/anchor validation to the ui-document patch
-  // boundary (validatePatch + anchorDriftErrors, atomically, no mutation).
+  // Delegate catalog/op/anchor/protected-surface validation to the application
+  // boundary (atomically, with no mutation). The shared structure check above
+  // is also used by apply and persistence, so all boundaries agree.
   const result = applyUiDocumentPatch(document, payload);
   if (!result.ok) return invalid(result.code, result.message);
   // Never retain caller-owned references: clone the validated patch so later
@@ -315,9 +312,10 @@ export type UiProposalDiscardResult =
  * Pure state machine for the formal compose-ui UI-proposal lifecycle. It owns
  * staging/apply/discard, sink-scoped idempotency, and browser-local persistence
  * and is fully dependency-injectable (so it is unit-testable without a DOM).
- * Every state change is transactional: the proposal store is written first and
- * in-memory/idempotency state is committed only when that write succeeds, so a
- * persistence failure leaves the prior state and is reported, never swallowed.
+ * Proposal state is committed in memory only after its storage write succeeds.
+ * Apply writes the document before proposal metadata: these two keys are not
+ * an atomic transaction. A metadata failure leaves the document durable but
+ * the proposal staged; it is reported, and reload/apply rejects the stale patch.
  * Proposal records cross the public API as defensive snapshots, preventing a
  * caller from mutating staged patch/state without going through this manager.
  * It never applies a patch merely because it was delivered: `stage` only
@@ -328,7 +326,6 @@ export class UiProposalManager {
   private readonly storage?: Storage;
   private readonly storageKey: string;
   private readonly documentStorageKey: string;
-  private readonly receipts = new Map<string, string>();
 
   constructor(options: {
     storage?: Storage;
@@ -344,14 +341,9 @@ export class UiProposalManager {
   }
 
   stage(input: UiProposalStageInput): UiProposalStageResult {
-    const checked = validateUiDocumentPatchProposal(input.payload, input.document);
-    if (!checked.ok) return { ok: false, code: checked.code, message: checked.message };
-    // Work only with the validated, canonical clone from here on: the caller's
-    // payload object is never retained, so mutating it after staging cannot
-    // change the stored record, the fingerprint, or later apply behavior.
-    const patch = checked.patch;
-    const fingerprint = JSON.stringify(patch);
-
+    const structureErrors = validatePatchStructure(input.payload);
+    if (structureErrors.length > 0) return { ok: false, code: 'invalid_patch', message: structureErrors[0]! };
+    const fingerprint = JSON.stringify(canonicalClone(input.payload));
     const prior = this.proposals.find((proposal) => proposal.proposal_id === input.result_id);
     if (prior) {
       // Compare canonical forms so property order or a tampered store cannot
@@ -359,10 +351,13 @@ export class UiProposalManager {
       if (JSON.stringify(canonicalClone(prior.patch)) !== fingerprint) {
         return { ok: false, code: 'idempotency_conflict', message: 'result id was already applied with a different patch proposal' };
       }
-      this.receipts.set(input.result_id, fingerprint);
+      // A receipt replay is not a new apply: the document may have advanced.
       return { ok: true, record: cloneProposalRecord(prior), receipt: buildUiProposalReceipt(prior) };
     }
 
+    const checked = validateUiDocumentPatchProposal(input.payload, input.document);
+    if (!checked.ok) return checked;
+    const patch = checked.patch;
     const record: UiProposalRecord = {
       proposal_id: input.result_id,
       document_id: patch.document_id,
@@ -380,7 +375,6 @@ export class UiProposalManager {
       return { ok: false, code: 'storage_failed', message: 'the application could not persist the staged UI proposal' };
     }
     this.proposals = nextRecords;
-    this.receipts.set(input.result_id, fingerprint);
     return { ok: true, record: cloneProposalRecord(record), receipt: buildUiProposalReceipt(record) };
   }
 
@@ -388,75 +382,54 @@ export class UiProposalManager {
   apply(document: UiDocument): UiProposalApplyResult {
     const proposal = this.currentRecord();
     if (!proposal) return { ok: false, code: 'no_proposal', message: 'no staged UI proposal to apply', record: null };
-    // Snapshot the mutable proposal fields so a failed persistence step can
-    // restore the exact prior state instead of leaving a half-applied record.
-    const prior = {
-      state: proposal.state,
-      error: proposal.error,
-      applied_revision: proposal.applied_revision,
-      applied_at: proposal.applied_at,
-    };
-    const restore = (): void => {
-      proposal.state = prior.state;
-      proposal.error = prior.error;
-      if (prior.applied_revision === undefined) delete proposal.applied_revision;
-      else proposal.applied_revision = prior.applied_revision;
-      if (prior.applied_at === undefined) delete proposal.applied_at;
-      else proposal.applied_at = prior.applied_at;
-    };
+    // stale is actionable only for discard/re-request, never for re-apply.
+    if (proposal.state === 'stale') {
+      return { ok: false, code: 'stale_patch', message: proposal.error ?? 'Re-request or discard this stale proposal.', record: cloneProposalRecord(proposal) };
+    }
     const result = applyUiDocumentPatch(document, proposal.patch);
     if (!result.ok) {
       const stale = document.revision !== proposal.base_revision;
-      proposal.state = 'stale';
-      proposal.error = stale
-        ? `Stale: the document moved to revision ${document.revision}; re-request or discard this proposal.`
-        : result.message;
-      if (!this.persist()) {
-        // The stale marking is not durable: leave the prior record untouched.
-        restore();
+      const next: UiProposalRecord = {
+        ...proposal,
+        state: 'stale',
+        error: stale
+          ? `Stale: the document moved to revision ${document.revision}; re-request or discard this proposal.`
+          : result.message.slice(0, MAX_STORED_MESSAGE_CHARS),
+      };
+      if (!this.commitProposal(proposal, next)) {
         return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated proposal state', record: cloneProposalRecord(proposal) };
       }
-      return { ok: false, code: result.code, message: proposal.error, record: cloneProposalRecord(proposal) };
+      return { ok: false, code: result.code, message: next.error!, record: cloneProposalRecord(next) };
     }
     // Persist-before-report-success: the updated active UiDocument must be
     // durable before we report applied or leave an in-memory mutation.
     if (!saveActiveDocument(this.storage, result.document, this.documentStorageKey)) {
-      return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated UI document', record: proposal };
+      return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated UI document', record: cloneProposalRecord(proposal) };
     }
-    proposal.state = 'applied';
-    proposal.applied_revision = result.document.revision;
-    proposal.applied_at = new Date().toISOString();
-    proposal.error = undefined;
-    // The document is durable, but the proposal record must still agree with it.
-    // If the metadata write fails, restore the record and report the failure
-    // instead of silently ignoring it; a retry re-applies the same patch.
-    if (!this.persist()) {
-      restore();
+    const next: UiProposalRecord = {
+      ...proposal,
+      state: 'applied',
+      applied_revision: result.document.revision,
+      applied_at: new Date().toISOString(),
+    };
+    // A failure here cannot roll back the document key. Keep the prior proposal
+    // and report failure; retry on the same in-memory base can converge, while
+    // reload uses the durable newer document and rejects the old patch.
+    if (!this.commitProposal(proposal, next)) {
       return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated proposal state', record: cloneProposalRecord(proposal) };
     }
-    return { ok: true, document: result.document, record: cloneProposalRecord(proposal), receipt: buildUiProposalReceipt(proposal) };
+    return { ok: true, document: result.document, record: cloneProposalRecord(next), receipt: buildUiProposalReceipt(next) };
   }
 
   /** Human Discard: remove the staged proposal (never apply merely because it was delivered). */
   discard(): UiProposalDiscardResult {
     const proposal = this.currentRecord();
     if (!proposal) return { ok: false, code: 'no_proposal', message: 'no staged UI proposal to discard', record: null };
-    const prior = {
-      state: proposal.state,
-      error: proposal.error,
-      discarded_at: proposal.discarded_at,
-    };
-    proposal.state = 'discarded';
-    proposal.discarded_at = new Date().toISOString();
-    if (!this.persist()) {
-      // The discard is not durable: leave the prior record untouched.
-      proposal.state = prior.state;
-      proposal.error = prior.error;
-      if (prior.discarded_at === undefined) delete proposal.discarded_at;
-      else proposal.discarded_at = prior.discarded_at;
+    const next: UiProposalRecord = { ...proposal, state: 'discarded', discarded_at: new Date().toISOString() };
+    if (!this.commitProposal(proposal, next)) {
       return { ok: false, code: 'storage_failed', message: 'the application could not persist the proposal store', record: cloneProposalRecord(proposal) };
     }
-    return { ok: true, code: 'discarded', message: `Discarded ${proposal.summary}.`, record: cloneProposalRecord(proposal) };
+    return { ok: true, code: 'discarded', message: `Discarded ${next.summary}.`, record: cloneProposalRecord(next) };
   }
 
   current(): UiProposalRecord | null {
@@ -472,18 +445,18 @@ export class UiProposalManager {
     return currentStagedProposal(this.proposals);
   }
 
-  private persist(): boolean {
-    return saveUiProposals(this.storage, this.proposals, this.storageKey);
+  private commitProposal(prior: UiProposalRecord, next: UiProposalRecord): boolean {
+    const records = this.proposals.map((record) => record === prior ? next : record);
+    if (!saveUiProposals(this.storage, records, this.storageKey)) return false;
+    this.proposals = records;
+    return true;
   }
 }
 
-/** The current actionable proposal: the latest staged or stale (unresolved) record. */
+/** The latest proposal is the only actionable one; terminal completion cannot reactivate older records. */
 export function currentStagedProposal(proposals: readonly UiProposalRecord[]): UiProposalRecord | null {
-  for (let index = proposals.length - 1; index >= 0; index -= 1) {
-    const proposal = proposals[index]!;
-    if (proposal.state === 'staged' || proposal.state === 'stale') return proposal;
-  }
-  return null;
+  const latest = proposals[proposals.length - 1];
+  return latest?.state === 'staged' || latest?.state === 'stale' ? latest : null;
 }
 
 /** Mark any unresolved proposal as superseded when a newer proposal is staged. */
@@ -527,7 +500,10 @@ export function loadActiveDocument(storage: Storage | undefined, storageKey: str
 export function saveActiveDocument(storage: Storage | undefined, document: UiDocument, storageKey: string): boolean {
   if (!storage) return false;
   try {
-    storage.setItem(storageKey, JSON.stringify(document));
+    if (checkUiDocument(document).length > 0) return false;
+    const serialized = JSON.stringify(document);
+    if (serialized.length > 128 * 1024) return false;
+    storage.setItem(storageKey, serialized);
     return true;
   } catch {
     return false;
@@ -542,7 +518,12 @@ export function loadUiProposals(storage: Storage | undefined, storageKey: string
     if (!raw || raw.length > 128 * 1024) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isStoredProposal).slice(-MAX_UI_PROPOSALS);
+    // Dropping an invalid latest record could resurrect superseded history.
+    // Accept only a valid, unambiguous retained window, or discard the window.
+    const records = parsed.slice(-MAX_UI_PROPOSALS);
+    if (!records.every(isStoredProposal)) return [];
+    if (new Set(records.map((record) => record.proposal_id)).size !== records.length) return [];
+    return records;
   } catch {
     return [];
   }
@@ -556,7 +537,12 @@ export function saveUiProposals(
 ): boolean {
   if (!storage) return false;
   try {
-    storage.setItem(storageKey, JSON.stringify(proposals.slice(-MAX_UI_PROPOSALS)));
+    const bounded = proposals.slice(-MAX_UI_PROPOSALS);
+    if (bounded.some((proposal) => !isStoredProposal(proposal))) return false;
+    if (new Set(bounded.map((proposal) => proposal.proposal_id)).size !== bounded.length) return false;
+    const serialized = JSON.stringify(bounded);
+    if (serialized.length > 128 * 1024) return false;
+    storage.setItem(storageKey, serialized);
     return true;
   } catch {
     return false;
@@ -585,9 +571,11 @@ function isStoredProposal(value: unknown): value is UiProposalRecord {
     if (typeof value.document_id !== 'string' || value.document_id.length === 0 || value.document_id.length > 64) return false;
     if (typeof value.base_revision !== 'number' || !Number.isInteger(value.base_revision) || value.base_revision < 0) return false;
     if (!isValidStoredPatch(value.patch)) return false;
-    const ops = (value.patch as { ops: unknown[] }).ops;
+    const patch = value.patch;
+    if (value.document_id !== patch.document_id || value.base_revision !== patch.base_revision) return false;
+    const ops = patch.ops;
     if (typeof value.op_count !== 'number' || !Number.isInteger(value.op_count) || value.op_count !== ops.length) return false;
-    if (typeof value.summary !== 'string' || value.summary.length === 0 || value.summary.length > MAX_STORED_SUMMARY_CHARS) return false;
+    if (typeof value.summary !== 'string' || value.summary !== summarizeUiPatch(patch) || value.summary.length === 0 || value.summary.length > MAX_STORED_SUMMARY_CHARS) return false;
     if (isExecutableText(value.summary)) return false;
     if (value.state !== 'staged' && value.state !== 'applied' && value.state !== 'discarded' && value.state !== 'stale') return false;
     if (typeof value.created_at !== 'string' || value.created_at.length === 0 || value.created_at.length > MAX_STORED_TIMESTAMP_CHARS) return false;
@@ -600,50 +588,33 @@ function isStoredProposal(value: unknown): value is UiProposalRecord {
       if (typeof value.error !== 'string' || value.error.length === 0 || value.error.length > MAX_STORED_MESSAGE_CHARS) return false;
       if (isExecutableText(value.error)) return false;
     }
-    return true;
+    return hasConsistentStateMetadata(value);
   } catch {
     return false;
   }
 }
 
-/**
- * Structural/contract validation for a stored `UiDocumentPatch`: known
- * envelope fields only, the exact patch contract version, and a bounded ops
- * array whose members have a valid discriminant and field shapes. Deep
- * catalog/anchor/stale validation stays at apply time against the
- * then-current document (a stored patch is never trusted on its own).
- */
-function isValidStoredPatch(value: unknown): boolean {
-  if (!isPlainRecord(value)) return false;
-  const envelopeKeys = new Set(['contract_version', 'document_id', 'base_revision', 'ops']);
-  if (Object.keys(value).some((key) => !envelopeKeys.has(key))) return false;
-  if (value.contract_version !== UI_DOCUMENT_PATCH_CONTRACT_VERSION) return false;
-  if (typeof value.document_id !== 'string' || value.document_id.length === 0 || value.document_id.length > 64) return false;
-  if (typeof value.base_revision !== 'number' || !Number.isInteger(value.base_revision) || value.base_revision < 0) return false;
-  if (!Array.isArray(value.ops) || value.ops.length === 0 || value.ops.length > MAX_UI_PATCH_OPS) return false;
-  for (const op of value.ops) {
-    if (!isPlainRecord(op)) return false;
-    if (op.op === 'insert') {
-      if (Object.keys(op).some((key) => !INSERT_OP_KEYS.has(key))) return false;
-      if (typeof op.index !== 'number' || !Number.isInteger(op.index) || op.index < 0) return false;
-      if (!isPlainRecord(op.node)) return false;
-      if (typeof op.node.id !== 'string' || op.node.id.length === 0) return false;
-      if (typeof op.node.kind !== 'string' || op.node.kind.length === 0) return false;
-    } else if (op.op === 'update') {
-      if (Object.keys(op).some((key) => !UPDATE_OP_KEYS.has(key))) return false;
-      if (typeof op.id !== 'string' || op.id.length === 0) return false;
-      if (!isPlainRecord(op.update)) return false;
-      const fields = Object.keys(op.update);
-      if (fields.length === 0 || fields.some((key) => !UPDATE_FIELDS.has(key))) return false;
-      if (fields.some((key) => !isPlainRecord((op.update as Record<string, unknown>)[key]))) return false;
-    } else if (op.op === 'remove') {
-      if (Object.keys(op).some((key) => !REMOVE_OP_KEYS.has(key))) return false;
-      if (typeof op.id !== 'string' || op.id.length === 0) return false;
-    } else {
-      return false;
-    }
+/** State-specific metadata, after field types/bounds have been validated. */
+function hasConsistentStateMetadata(value: Record<string, unknown>): boolean {
+  const hasApplied = value.applied_revision !== undefined || value.applied_at !== undefined;
+  const hasDiscarded = value.discarded_at !== undefined;
+  switch (value.state) {
+    case 'staged': return !hasApplied && !hasDiscarded && value.error === undefined;
+    case 'stale': return !hasApplied && !hasDiscarded && value.error !== undefined;
+    case 'applied': return value.applied_revision === (value.base_revision as number) + 1
+      && value.applied_at !== undefined && !hasDiscarded && value.error === undefined;
+    // Legacy discarded stale proposals retain their bounded diagnostic error.
+    case 'discarded': return hasDiscarded && !hasApplied;
+    default: return false;
   }
-  return JSON.stringify(value).length <= MAX_STORED_PATCH_CHARS;
+}
+
+/**
+ * Share patch shape checks with staging/apply without treating storage as
+ * evidence that the patch is valid against the current document.
+ */
+function isValidStoredPatch(value: unknown): value is UiDocumentPatch {
+  return validatePatchStructure(value).length === 0;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

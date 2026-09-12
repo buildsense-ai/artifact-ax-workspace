@@ -67,6 +67,7 @@ import {
   loadActiveDocument,
   loadUiProposals,
   uiProposalStorageKey,
+  uiProposalDeliveryStatus,
   type UiProposalRecord,
 } from './ui-builder.js';
 
@@ -1023,7 +1024,7 @@ export class DemoApp {
       document: activeDocument,
     });
     if (!result.ok) return resultFailure(result.code, result.message);
-    this.uiBuilderStatus = `Staged ${result.record.summary}; review and apply or discard it.`;
+    this.uiBuilderStatus = uiProposalDeliveryStatus(result.record);
     this.renderApp();
     return { status: 'applied', receipt: { ...result.receipt } };
   }

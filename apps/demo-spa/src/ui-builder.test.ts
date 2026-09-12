@@ -21,6 +21,7 @@ import {
   summarizeUiPatch,
   supersedePendingProposals,
   uiProposalStorageKey,
+  uiProposalDeliveryStatus,
   validateUiDocumentPatchProposal,
   type UiProposalRecord,
 } from './ui-builder.js';
@@ -270,14 +271,16 @@ describe('compose-ui · staged proposal persistence and state transitions', () =
     const newer = staged({ proposal_id: 'arr_'.concat('C'.repeat(43)), summary: 'new' });
     const applied = staged({ proposal_id: 'arr_'.concat('D'.repeat(43)), summary: 'applied', state: 'applied' });
     expect(currentStagedProposal([older, newer])?.summary).toBe('new');
-    expect(currentStagedProposal([older, applied])?.summary).toBe('old');
+    // Once the newest proposal reaches a terminal state, older stale records
+    // are history and must never become actionable again.
+    expect(currentStagedProposal([older, applied])).toBeNull();
     expect(currentStagedProposal([applied])).toBeNull();
   });
 
   it('supersedes any unresolved proposal when a newer one is staged', () => {
     const a = staged({ proposal_id: 'arr_'.concat('E'.repeat(43)), summary: 'a' });
-    const b = staged({ proposal_id: 'arr_'.concat('F'.repeat(43)), summary: 'b', state: 'stale' });
-    const resolved = staged({ proposal_id: 'arr_'.concat('G'.repeat(43)), summary: 'applied', state: 'applied' });
+    const b = staged({ proposal_id: 'arr_'.concat('F'.repeat(43)), summary: 'b', state: 'stale', error: 'old' });
+    const resolved = staged({ proposal_id: 'arr_'.concat('G'.repeat(43)), summary: 'applied', state: 'applied', applied_revision: 2, applied_at: '2026-09-03T00:00:00.000Z' });
     const next = supersedePendingProposals([a, b, resolved]);
     expect(next[0]!.state).toBe('stale');
     expect(next[1]!.state).toBe('stale');
@@ -330,6 +333,19 @@ describe('compose-ui · staged proposal persistence and state transitions', () =
 describe('compose-ui · UiProposalManager stage/apply/discard + sink-scoped idempotency', () => {
   const storage = () => mockStorage();
   const manager = (initial?: UiProposalRecord[]) => new UiProposalManager({ storage: storage(), storageKey: uiProposalStorageKey('ws_demo', 'lesson-report'), initial });
+
+  it('does not reactivate a superseded proposal after the newer proposal completes', () => {
+    const mgr = manager();
+    const first = mgr.stage({ result_id: 'arr_'.concat('Y'.repeat(43)), payload: validPatch(), document: LESSON_REPORT_DOCUMENT });
+    expect(first.ok).toBe(true);
+    const secondPatch = validPatch({ ops: [{ op: 'remove', id: 'event-log' }] });
+    const second = mgr.stage({ result_id: 'arr_'.concat('Z'.repeat(43)), payload: secondPatch, document: LESSON_REPORT_DOCUMENT });
+    expect(second.ok).toBe(true);
+    const applied = mgr.apply(LESSON_REPORT_DOCUMENT);
+    expect(applied.ok).toBe(true);
+    expect(mgr.current()).toBeNull();
+    expect(mgr.list().map((proposal) => proposal.state)).toEqual(['stale', 'applied']);
+  });
 
   it('stages a delivered patch durably and re-staging the same result_id is idempotent', () => {
     const mgr = manager();
@@ -441,7 +457,13 @@ describe('compose-ui · UiProposalManager stage/apply/discard + sink-scoped idem
     expect(stage.ok).toBe(true);
     const applied = mgr.apply(LESSON_REPORT_DOCUMENT);
     expect(applied.ok).toBe(false);
-    if (!applied.ok) expect(applied.code).toBe('storage_failed');
+    if (!applied.ok) {
+      expect(applied.code).toBe('storage_failed');
+      // Even this failure branch must return a detached snapshot.
+      applied.record!.state = 'discarded';
+      applied.record!.patch.ops.push({ op: 'remove', id: 'event-log' });
+    }
+    expect(mgr.current()?.patch.ops).toHaveLength(1);
     // Rollback: the proposal is still staged and the base document is unchanged.
     expect(mgr.current()?.state).toBe('staged');
     expect(LESSON_REPORT_DOCUMENT.revision).toBe(1);
@@ -470,8 +492,8 @@ describe('compose-ui · UiProposalManager stage/apply/discard + sink-scoped idem
     // The proposal record is restored, never left half-applied.
     expect(mgr.current()?.state).toBe('staged');
     expect(mgr.current()?.error).toBeUndefined();
-    // The document write itself did land; the edge is explicit and the still-
-    // staged record matches it, so a retry re-applies the same patch.
+    // The document write landed but proposal metadata did not. This is NOT
+    // an atomic two-key transaction. Retry on the old in-memory base converges.
     expect(loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT).revision).toBe(LESSON_REPORT_DOCUMENT.revision + 1);
     const retried = mgr.apply(LESSON_REPORT_DOCUMENT);
     expect(retried.ok).toBe(true);
@@ -588,6 +610,168 @@ describe('compose-ui · UiProposalManager stage/apply/discard + sink-scoped idem
   });
 });
 
+// Application-service integration: real stage/apply/discard and persistence
+// helpers with a synthetic Storage adapter. This is not browser/Host E2E.
+describe('compose-ui · apply/reload integration', () => {
+  const proposalKey = uiProposalStorageKey('ws_demo', 'lesson-report');
+  const docKey = activeDocumentStorageKey('ws_demo', 'lesson-report');
+  const resultId = 'arr_'.concat('0'.repeat(43));
+  const open = (storage: Storage) => new UiProposalManager({
+    storage, storageKey: proposalKey, documentStorageKey: docKey,
+    initial: loadUiProposals(storage, proposalKey),
+  });
+
+  it.each(['apply', 'discard'] as const)('roundtrips stage -> reload -> %s -> reload without reactivating history', (action) => {
+    const storage = mockStorage();
+    const mgr = open(storage);
+    expect(mgr.stage({ result_id: resultId, payload: validPatch(), document: LESSON_REPORT_DOCUMENT }).ok).toBe(true);
+    const latestId = 'arr_'.concat('1'.repeat(43));
+    const patch = validPatch({ ops: [{ op: 'remove', id: 'event-log' }] });
+    expect(mgr.stage({ result_id: latestId, payload: patch, document: LESSON_REPORT_DOCUMENT }).ok).toBe(true);
+    expect(loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT)).toEqual(LESSON_REPORT_DOCUMENT);
+    expect(loadUiProposals(storage, proposalKey)).toEqual(mgr.list());
+
+    const reopened = open(storage);
+    const result = action === 'apply' ? reopened.apply(LESSON_REPORT_DOCUMENT) : reopened.discard();
+    expect(result.ok).toBe(true);
+    const finalDocument = loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT);
+    expect(finalDocument.revision).toBe(action === 'apply' ? 2 : 1);
+    expect(finalDocument.nodes.some((node) => node.id === 'event-log')).toBe(action !== 'apply');
+    expect(missingProtectedNodes(finalDocument)).toEqual([]);
+    const final = open(storage);
+    expect(final.list()).toEqual(reopened.list());
+    expect(final.current()).toBeNull();
+    expect(final.apply(finalDocument)).toMatchObject({ ok: false, code: 'no_proposal' });
+    expect(final.discard()).toMatchObject({ ok: false, code: 'no_proposal' });
+    // Same delivery is a receipt replay even after apply advanced the document.
+    const replay = final.stage({ result_id: latestId, payload: patch, document: finalDocument });
+    expect(replay.ok).toBe(true);
+    if (replay.ok) expect(uiProposalDeliveryStatus(replay.record)).toContain('no new proposal was staged');
+    expect(final.current()).toBeNull();
+    expect(final.stage({ result_id: latestId, payload: validPatch(), document: finalDocument }))
+      .toMatchObject({ ok: false, code: 'idempotency_conflict' });
+    expect(loadUiProposals(storage, uiProposalStorageKey('other', 'lesson-report'))).toEqual([]);
+    expect(loadActiveDocument(storage, activeDocumentStorageKey('other', 'lesson-report'), LESSON_REPORT_DOCUMENT)).toEqual(LESSON_REPORT_DOCUMENT);
+  });
+
+  it('keeps the older staged proposal actionable when staging its replacement fails', () => {
+    const armed = new Set<string>();
+    const storage = mockStorage({}, armed);
+    const mgr = open(storage);
+    expect(mgr.stage({ result_id: resultId, payload: validPatch(), document: LESSON_REPORT_DOCUMENT }).ok).toBe(true);
+    const before = mgr.list();
+    armed.add(proposalKey);
+    expect(mgr.stage({ result_id: 'arr_'.concat('3'.repeat(43)), payload: validPatch(), document: LESSON_REPORT_DOCUMENT }))
+      .toMatchObject({ ok: false, code: 'storage_failed' });
+    expect(mgr.list()).toEqual(before);
+    expect(open(storage).current()).toEqual(before[0]);
+  });
+
+  it('roundtrips a mixed remove/insert/update patch without losing validated node fields', () => {
+    const storage = mockStorage();
+    const mgr = open(storage);
+    const eventLog = LESSON_REPORT_DOCUMENT.nodes.find((node) => node.id === 'event-log')!;
+    const patch = validPatch({ ops: [
+      { op: 'remove', id: 'event-log' },
+      { op: 'insert', index: 0, node: eventLog },
+      ...validPatch().ops,
+    ] });
+    expect(mgr.stage({ result_id: resultId, payload: patch, document: LESSON_REPORT_DOCUMENT }).ok).toBe(true);
+    expect(open(storage).list()).toEqual(mgr.list());
+    const result = open(storage).apply(LESSON_REPORT_DOCUMENT);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.document.nodes[0]).toEqual(eventLog);
+      expect(loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT)).toEqual(result.document);
+    }
+  });
+
+  it('handles reload after the document write lands but metadata fails; stale cannot reapply and remains discardable', () => {
+    const armed = new Set<string>();
+    const storage = mockStorage({}, armed);
+    const mgr = open(storage);
+    expect(mgr.stage({ result_id: resultId, payload: validPatch(), document: LESSON_REPORT_DOCUMENT }).ok).toBe(true);
+    armed.add(proposalKey);
+    const failed = mgr.apply(LESSON_REPORT_DOCUMENT);
+    expect(failed).toMatchObject({ ok: false, code: 'storage_failed' });
+    if (!failed.ok) failed.record!.patch.ops.length = 0;
+    expect(mgr.current()?.patch.ops).toHaveLength(1);
+    const durableDocument = loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT);
+    expect(durableDocument.revision).toBe(2);
+    const reopened = open(storage);
+    expect(reopened.current()?.state).toBe('staged');
+    expect(reopened.apply(durableDocument)).toMatchObject({ ok: false, code: 'invalid_patch' });
+    expect(loadUiProposals(storage, proposalKey)[0]?.state).toBe('stale');
+    // Even supplying an older document cannot turn a known stale proposal active.
+    expect(reopened.apply(LESSON_REPORT_DOCUMENT)).toMatchObject({ ok: false, code: 'stale_patch' });
+    armed.add(proposalKey);
+    expect(reopened.discard()).toMatchObject({ ok: false, code: 'storage_failed' });
+    expect(reopened.current()?.state).toBe('stale');
+    expect(reopened.discard().ok).toBe(true);
+    expect(open(storage).list()[0]).toMatchObject({ state: 'discarded', error: expect.any(String) });
+    expect(open(storage).current()).toBeNull();
+    expect(loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT)).toEqual(durableDocument);
+  });
+
+  it('isolates constructor records and all failed-operation snapshots', () => {
+    const armed = new Set<string>();
+    const storage = mockStorage({}, armed);
+    const mgr = open(storage);
+    expect(mgr.stage({ result_id: resultId, payload: validPatch(), document: LESSON_REPORT_DOCUMENT }).ok).toBe(true);
+    const initial = mgr.list();
+    const next = new UiProposalManager({ storage, storageKey: proposalKey, documentStorageKey: docKey, initial });
+    initial[0]!.patch.ops.length = 0;
+    initial[0]!.state = 'applied';
+    expect(next.current()?.patch.ops).toHaveLength(1);
+    const current = next.current()!;
+    current.patch.ops.length = 0;
+    current.state = 'discarded';
+    expect(next.current()?.state).toBe('staged');
+    armed.add(proposalKey);
+    const discardFailure = next.discard();
+    if (!discardFailure.ok) discardFailure.record!.state = 'applied';
+    expect(next.current()?.state).toBe('staged');
+    armed.add(proposalKey);
+    const staleFailure = next.apply({ ...LESSON_REPORT_DOCUMENT, revision: 2 });
+    if (!staleFailure.ok) staleFailure.record!.patch.ops.length = 0;
+    expect(next.current()?.patch.ops).toHaveLength(1);
+    expect(next.current()?.state).toBe('staged');
+    expect(next.apply(LESSON_REPORT_DOCUMENT).ok).toBe(true);
+  });
+
+  it('uses the same closed shape and size checks for stage, save, reload and apply', () => {
+    const badPatches = [
+      { ...validPatch(), extra: true },
+      validPatch({ ops: [{ op: 'remove', id: 'event-log', extra: true } as unknown as UiDocumentPatch['ops'][number]] }),
+      validPatch({ ops: [{ op: 'update', id: 'review-table', update: { props: { emptyText: 'x'.repeat(9000) } } }] }),
+      { ...validPatch(), ops: [{ op: 'insert', index: 0, node: { id: 'event-log', kind: 'event-log', children: [{ id: 'child', kind: 'event-log', extra: true }] } }] },
+    ];
+    const storage = mockStorage();
+    const mgr = open(storage);
+    const staged = mgr.stage({ result_id: resultId, payload: validPatch(), document: LESSON_REPORT_DOCUMENT });
+    expect(staged.ok).toBe(true);
+    if (!staged.ok) return;
+    for (const patch of badPatches) {
+      expect(mgr.stage({ result_id: 'arr_'.concat('2'.repeat(43)), payload: patch, document: LESSON_REPORT_DOCUMENT }).ok).toBe(false);
+      const record = { ...staged.record, patch } as UiProposalRecord;
+      expect(saveUiProposals(storage, [record], proposalKey)).toBe(false);
+      const fixture = mockStorage({ [proposalKey]: JSON.stringify([record]) });
+      expect(loadUiProposals(fixture, proposalKey)).toEqual([]);
+      expect(applyUiDocumentPatch(LESSON_REPORT_DOCUMENT, patch).ok).toBe(false);
+    }
+    expect(loadUiProposals(storage, proposalKey)).toEqual([staged.record]);
+  });
+
+  it('rejects invalid documents before saving rather than writing data reload would discard', () => {
+    const storage = mockStorage();
+    expect(saveActiveDocument(storage, LESSON_REPORT_DOCUMENT, docKey)).toBe(true);
+    const stripped = { ...LESSON_REPORT_DOCUMENT, nodes: LESSON_REPORT_DOCUMENT.nodes.filter((node) => node.id !== 'ui-builder') };
+    expect(saveActiveDocument(storage, stripped, docKey)).toBe(false);
+    expect(applyUiDocumentPatch(stripped, validPatch())).toMatchObject({ ok: false, code: 'protected_surface' });
+    expect(loadActiveDocument(storage, docKey, LESSON_REPORT_DOCUMENT)).toEqual(LESSON_REPORT_DOCUMENT);
+  });
+});
+
 describe('compose-ui · no-Host behavior', () => {
   it('does not dispatch a compose-ui task when no Host is present', async () => {
     const outbox = new CloudHostOutbox({
@@ -636,6 +820,15 @@ describe('compose-ui · persisted proposal reload fails closed', () => {
     rejects('unknown record field', { sneaky: true });
     rejects('non-integer base_revision', { base_revision: 1.5 });
     rejects('op_count mismatch', { op_count: 2 });
+    rejects('document mismatch', { document_id: 'other.v1' });
+    rejects('revision mismatch', { base_revision: 9 });
+    rejects('misleading summary', { summary: 'Approved all reports' });
+    rejects('staged with applied metadata', { applied_revision: 2, applied_at: '2026-09-03T00:00:00.000Z' });
+    rejects('stale without diagnostic', { state: 'stale' });
+    rejects('applied without metadata', { state: 'applied' });
+    rejects('applied with wrong revision', { state: 'applied', applied_revision: 7, applied_at: '2026-09-03T00:00:00.000Z' });
+    rejects('discarded without timestamp', { state: 'discarded' });
+    rejects('discarded with applied metadata', { state: 'discarded', discarded_at: '2026-09-03T00:00:00.000Z', applied_revision: 2 });
     rejects('oversized summary', { summary: 'x'.repeat(2001) });
     rejects('executable summary', { summary: 'no <script>alert(1)</script> please' });
     rejects('executable error', { error: 'onerror= alert(1)' });
@@ -651,6 +844,16 @@ describe('compose-ui · persisted proposal reload fails closed', () => {
     rejects('serialized patch over the byte bound', {
       patch: patchWithRawOps([{ op: 'update', id: 'review-table', update: { props: { regionId: 'review-table', regionTitle: 'Review table', emptyText: 'x'.repeat(9000) } } }]),
     });
+  });
+
+  it('does not resurrect old proposals by filtering malformed or duplicate records out of history', () => {
+    expect(loadUiProposals(stored([record(), record({ state: 'corrupt' })]), key)).toEqual([]);
+    expect(loadUiProposals(stored([record(), record()]), key)).toEqual([]);
+  });
+
+  it('keeps legacy discarded stale diagnostics reloadable', () => {
+    const legacy = record({ state: 'discarded', discarded_at: '2026-09-03T00:00:00.000Z', error: 'Stale: re-request.' });
+    expect(loadUiProposals(stored([legacy]), key)).toEqual([legacy]);
   });
 
   it('still revalidates a loaded proposal against the then-current document at apply', () => {

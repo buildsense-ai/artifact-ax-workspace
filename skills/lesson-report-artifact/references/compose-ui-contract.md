@@ -106,7 +106,7 @@ rejected as `anchor_drift`. Use only these:
 - Region ids: `review-table`, `focus-set`, `summary-panel`, `approval-panel`,
   `event-log`, `context-outbox`, `agent-notes`, `ui-builder`.
 
-## Protected governance surfaces (never removable)
+## Protected governance surfaces (retain identity and wiring)
 
 Three surfaces are human/governance surfaces and a proposal **cannot remove
 them**: `review-table` (the human review table), `approval-list` (the human
@@ -114,6 +114,25 @@ approval panel), and `ui-builder` (the Builder panel that gates every Agent
 patch behind a human apply/discard decision). A patch containing a `remove` op
 for any of these is rejected with code `protected_surface` before it is staged.
 Do not propose their removal, and do not try to remove-then-reinsert them.
+
+Their **deployed wiring is fixed**, not just their presence:
+
+| Node id / kind | Fixed region id | Required data source |
+| --- | --- | --- |
+| review-table | review-table | `reviewTable.*` bindings from the deployed document |
+| approval-list | approval-panel | `approvals` |
+| ui-builder | ui-builder | `uiBuilder.*` bindings from the deployed document |
+
+Retain every deployed binding name/path and event/action pair on these three
+nodes, including Builder labels, proposal/status data, and disabled-state
+bindings. Do not redirect bindings to other paths, remove events, replace a
+component kind, or reuse another known region ID. The page validates these
+against `apps/demo-spa/src/ui/lesson-report.document.ts` during stage/apply and
+active-document reload. Breaking this invariant is rejected as
+`protected_surface` (a catalog/anchor violation may be rejected earlier).
+You may still edit bounded cosmetic props such as `regionTitle`, `hint`, and
+`emptyText` where the catalog allows them. Legal placement remains valid in a
+UI document; v1 update ops do not include a placement field.
 
 ## Constraints (the page rejects these)
 
@@ -128,7 +147,9 @@ Do not propose their removal, and do not try to remove-then-reinsert them.
 - Inserting a brand-new stable anchor (the closed catalog does not allow
   inventing a node or region id).
 - Removing a protected governance surface (`review-table`, `approval-list`,
-  `ui-builder`) — rejected with code `protected_surface`.
+  `ui-builder`), or changing its deployed kind, region ID, data bindings, or
+  action bindings — rejected with code `protected_surface` when it reaches
+  application-policy validation.
 
 ## Minimal safe example
 
