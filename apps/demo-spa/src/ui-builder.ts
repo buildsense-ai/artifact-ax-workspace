@@ -256,6 +256,11 @@ function canonicalClone(value: unknown): unknown {
   return value;
 }
 
+/** Return a detached proposal snapshot at the Manager's public API boundary. */
+function cloneProposalRecord(record: UiProposalRecord): UiProposalRecord {
+  return canonicalClone(record) as UiProposalRecord;
+}
+
 /** A compact, human-readable one-line summary of the ops in a patch. */
 export function summarizeUiPatch(patch: UiDocumentPatch): string {
   const parts = patch.ops.map((op) => {
@@ -313,6 +318,8 @@ export type UiProposalDiscardResult =
  * Every state change is transactional: the proposal store is written first and
  * in-memory/idempotency state is committed only when that write succeeds, so a
  * persistence failure leaves the prior state and is reported, never swallowed.
+ * Proposal records cross the public API as defensive snapshots, preventing a
+ * caller from mutating staged patch/state without going through this manager.
  * It never applies a patch merely because it was delivered: `stage` only
  * validates and durably stores a proposal; a human `apply`/`discard` decides.
  */
@@ -330,7 +337,7 @@ export class UiProposalManager {
     documentStorageKey?: string;
     initial?: readonly UiProposalRecord[];
   } = {}) {
-    this.proposals = [...(options.initial ?? [])];
+    this.proposals = (options.initial ?? []).map(cloneProposalRecord);
     this.storage = options.storage;
     this.storageKey = options.storageKey ?? UI_PROPOSAL_STORAGE_KEY;
     this.documentStorageKey = options.documentStorageKey ?? UI_ACTIVE_DOCUMENT_STORAGE_KEY;
@@ -353,7 +360,7 @@ export class UiProposalManager {
         return { ok: false, code: 'idempotency_conflict', message: 'result id was already applied with a different patch proposal' };
       }
       this.receipts.set(input.result_id, fingerprint);
-      return { ok: true, record: prior, receipt: buildUiProposalReceipt(prior) };
+      return { ok: true, record: cloneProposalRecord(prior), receipt: buildUiProposalReceipt(prior) };
     }
 
     const record: UiProposalRecord = {
@@ -374,12 +381,12 @@ export class UiProposalManager {
     }
     this.proposals = nextRecords;
     this.receipts.set(input.result_id, fingerprint);
-    return { ok: true, record, receipt: buildUiProposalReceipt(record) };
+    return { ok: true, record: cloneProposalRecord(record), receipt: buildUiProposalReceipt(record) };
   }
 
   /** Human Apply: revalidate against the then-current document and apply. */
   apply(document: UiDocument): UiProposalApplyResult {
-    const proposal = this.current();
+    const proposal = this.currentRecord();
     if (!proposal) return { ok: false, code: 'no_proposal', message: 'no staged UI proposal to apply', record: null };
     // Snapshot the mutable proposal fields so a failed persistence step can
     // restore the exact prior state instead of leaving a half-applied record.
@@ -407,9 +414,9 @@ export class UiProposalManager {
       if (!this.persist()) {
         // The stale marking is not durable: leave the prior record untouched.
         restore();
-        return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated proposal state', record: proposal };
+        return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated proposal state', record: cloneProposalRecord(proposal) };
       }
-      return { ok: false, code: result.code, message: proposal.error, record: proposal };
+      return { ok: false, code: result.code, message: proposal.error, record: cloneProposalRecord(proposal) };
     }
     // Persist-before-report-success: the updated active UiDocument must be
     // durable before we report applied or leave an in-memory mutation.
@@ -425,14 +432,14 @@ export class UiProposalManager {
     // instead of silently ignoring it; a retry re-applies the same patch.
     if (!this.persist()) {
       restore();
-      return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated proposal state', record: proposal };
+      return { ok: false, code: 'storage_failed', message: 'the application could not persist the updated proposal state', record: cloneProposalRecord(proposal) };
     }
-    return { ok: true, document: result.document, record: proposal, receipt: buildUiProposalReceipt(proposal) };
+    return { ok: true, document: result.document, record: cloneProposalRecord(proposal), receipt: buildUiProposalReceipt(proposal) };
   }
 
   /** Human Discard: remove the staged proposal (never apply merely because it was delivered). */
   discard(): UiProposalDiscardResult {
-    const proposal = this.current();
+    const proposal = this.currentRecord();
     if (!proposal) return { ok: false, code: 'no_proposal', message: 'no staged UI proposal to discard', record: null };
     const prior = {
       state: proposal.state,
@@ -447,17 +454,22 @@ export class UiProposalManager {
       proposal.error = prior.error;
       if (prior.discarded_at === undefined) delete proposal.discarded_at;
       else proposal.discarded_at = prior.discarded_at;
-      return { ok: false, code: 'storage_failed', message: 'the application could not persist the proposal store', record: proposal };
+      return { ok: false, code: 'storage_failed', message: 'the application could not persist the proposal store', record: cloneProposalRecord(proposal) };
     }
-    return { ok: true, code: 'discarded', message: `Discarded ${proposal.summary}.`, record: proposal };
+    return { ok: true, code: 'discarded', message: `Discarded ${proposal.summary}.`, record: cloneProposalRecord(proposal) };
   }
 
   current(): UiProposalRecord | null {
-    return currentStagedProposal(this.proposals);
+    const proposal = this.currentRecord();
+    return proposal ? cloneProposalRecord(proposal) : null;
   }
 
   list(): UiProposalRecord[] {
-    return [...this.proposals];
+    return this.proposals.map(cloneProposalRecord);
+  }
+
+  private currentRecord(): UiProposalRecord | null {
+    return currentStagedProposal(this.proposals);
   }
 
   private persist(): boolean {

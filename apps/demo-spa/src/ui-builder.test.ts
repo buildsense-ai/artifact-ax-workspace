@@ -544,6 +544,27 @@ describe('compose-ui · UiProposalManager stage/apply/discard + sink-scoped idem
     }
   });
 
+  it('does not expose mutable proposal state through stage, current, or list snapshots', () => {
+    const mgr = manager();
+    const stage = mgr.stage({ result_id: 'arr_'.concat('W'.repeat(43)), payload: validPatch(), document: LESSON_REPORT_DOCUMENT });
+    expect(stage.ok).toBe(true);
+    if (!stage.ok) return;
+
+    stage.record.state = 'applied';
+    const stagedOp = stage.record.patch.ops[0] as { update: { props: Record<string, string> } };
+    stagedOp.update.props.emptyText = 'tampered stage result';
+
+    const current = mgr.current();
+    expect(current?.state).toBe('staged');
+    expect((current?.patch.ops[0] as { update: { props: Record<string, string> } }).update.props.emptyText).toBe('No rows.');
+
+    const listed = mgr.list();
+    listed[0]!.state = 'discarded';
+    (listed[0]!.patch.ops[0] as { update: { props: Record<string, string> } }).update.props.emptyText = 'tampered list result';
+    expect(mgr.current()?.state).toBe('staged');
+    expect((mgr.current()?.patch.ops[0] as { update: { props: Record<string, string> } }).update.props.emptyText).toBe('No rows.');
+  });
+
   it('fingerprints canonically: reordered re-delivery is idempotent, a different valid patch conflicts', () => {
     const mgr = manager();
     const resultId = 'arr_'.concat('V'.repeat(43));
