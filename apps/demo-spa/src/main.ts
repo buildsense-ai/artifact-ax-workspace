@@ -452,7 +452,14 @@ async function start(): Promise<void> {
     }
 
     const payload = normalizeCollabResultDoc(doc.value);
-    if (!payload) return;
+    if (!payload) {
+      // A malformed/unvalidatable result doc must not vanish silently —
+      // this is the exact "task completed, result missing" signature that
+      // cost a debug cycle on the first real deploy.
+      console.warn('[result] doc failed validation, dropped:', data.key,
+        JSON.stringify(doc.value).slice(0, 400));
+      return;
+    }
     const applied = board.applyAgentResult({
       resultId: data.key,
       findingId: payload.finding.finding_id,

@@ -3,6 +3,7 @@ import * as Y from 'yjs';
 import { createMockSession, devIdentity } from '@artifact-ax/runtime-client';
 import type { RuntimeSession } from '@artifact-ax/runtime-client';
 import { AgentLoop } from './agent-loop.js';
+import type { AgentContext } from './agent-loop.js';
 import { CollabDoc, YJS_UPDATE_FORMAT } from './doc.js';
 import { Journal, journalKey } from './journal.js';
 import { Presence, presenceKey } from './presence.js';
@@ -158,19 +159,20 @@ describe('AgentLoop', () => {
   it('a wake enqueued mid-drain is not stranded', async () => {
     const s = session('bot2');
     const seen: string[] = [];
-    let loop!: AgentLoop;
-    const decider = async (ctx: import('./agent-loop.js').AgentContext) => {
-      const id = ctx.wake.task?.task_id ?? ctx.wake.event?.key ?? '?';
-      seen.push(id);
-      if (id === 't-1') {
-        // Enqueue a second task from inside the running pass — exercises
-        // the drain tail path.
-        loop.wakeTask({ task_id: 't-2', intentId: 'x', payload: {} });
-      }
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      return [{ kind: 'wait', reason: 'done' }];
-    };
-    loop = new AgentLoop({ session: s, decider });
+    const loop = new AgentLoop({
+      session: s,
+      decider: async (ctx: AgentContext) => {
+        const id = ctx.wake.task?.task_id ?? ctx.wake.event?.key ?? '?';
+        seen.push(id);
+        if (id === 't-1') {
+          // Enqueue a second task from inside the running pass — exercises
+          // the drain tail path.
+          loop.wakeTask({ task_id: 't-2', intentId: 'x', payload: {} });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return [{ kind: 'wait' as const, reason: 'done' }];
+      },
+    });
     loop.wakeTask({ task_id: 't-1', intentId: 'x', payload: {} });
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(seen).toContain('t-1');

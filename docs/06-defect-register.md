@@ -22,6 +22,13 @@ why it matters, how to verify/fix. Status date: 2026-09-30.
 | P1-4 | **Cross-actor journal order is timestamp-approximate** | "What happened" is legible; causal ordering is not provable | Correlate entries with commit-ordered `event_id` stream when strict order is needed (recorded in `05`) |
 | P1-5 | **Transient dual-leader on joins** | `isLeader()` can be true on two sides during presence churn → duplicate judge submissions / materializations | All leader actions are idempotent-by-key today; add leader epoch/fencing if duplication becomes visible |
 
+## P1.5 — porting hazards (learned from the online-todo deploy)
+
+| # | Defect | Why it matters | Verify / fix |
+|---|--------|----------------|--------------|
+| P1.5-1 | **Schema identifiers are not display labels** | Found in production: renaming `kind: 'review-table'` → `'todo-table'` in the agent's document made `checkDocument` reject it — the whole result doc silently dropped, looking exactly like "result never written". Catalog kinds, contract_version strings, namespace names, and entity key prefixes are **cross-boundary identifiers** — they must stay stable across domain renames; only display labels, DOM anchors, and self-consistent internal keys may follow the domain | Keep `checkDocument` failures loud-ish: `normalize*` already rejects the whole result — document the rename boundary in the porting guide; consider logging `RDIAG`-style normalize failures in dev |
+| P1.5-2 | **Silent normalize drops** | `handleResultEvent` `if (!payload) return;` discards malformed result docs invisibly — indistinguishable from "agent never wrote" | Dev-mode `console.warn` on normalize rejection (cheap; a real artifact needs a rejection receipt path anyway) |
+
 ## P2 — UX & maintenance edges
 
 | # | Defect | Why it matters | Verify / fix |
