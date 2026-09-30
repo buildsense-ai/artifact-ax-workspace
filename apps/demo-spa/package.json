@@ -1,23 +1,24 @@
 {
   "name": "@artifact-ax/demo-spa",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "AX-friendly teaching report SPA: stable region identifiers, manifest-driven command surface, approval panel, event log. Uses the HTTP gateway when reachable and an in-process mock transport otherwise.",
+  "description": "Collaborative teaching-report artifact: Yjs-synced shared board over the CatsCo Artifact Runtime, presence, semantic journal, agent tasks and staged results.",
   "scripts": {
     "dev": "vite",
+    "jev:sidecar": "node scripts/jev-sidecar.mjs",
     "build": "vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src"
   },
   "dependencies": {
-    "@artifact-ax/auth": "workspace:*",
-    "@artifact-ax/catsco-adapter": "workspace:*",
+    "@artifact-ax/collab": "workspace:*",
     "@artifact-ax/contract": "workspace:*",
-    "@artifact-ax/domain": "workspace:*",
+    "@artifact-ax/jev": "workspace:*",
     "@artifact-ax/lesson-report": "workspace:*",
-    "@artifact-ax/trigger": "workspace:*",
-    "@artifact-ax/ui-document": "workspace:*"
+    "@artifact-ax/runtime-client": "workspace:*",
+    "@artifact-ax/ui-document": "workspace:*",
+    "yjs": "^13.6.21"
   },
   "devDependencies": {
     "vite": "^6.0.0"

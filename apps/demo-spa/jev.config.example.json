@@ -1,0 +1,6 @@
+{
+  "apiKey": "put-your-typesafe-systemone-key-here",
+  "baseUrl": "https://api.typesafe.ai",
+  "model": "jev-1.13.0",
+  "port": 8787
+}

@@ -1,10 +1,26 @@
 {
-  "contract_version": "catsco.artifact-manifest.v3",
-  "purpose": "Review teaching-report rows and compose a bounded UI-document patch with a human or the owning Agent.",
-  "views": ["review-table", "summary-panel", "approval-panel", "agent-notes", "ui-builder"],
-  "entities": ["lesson-review-row", "agent-review-note", "ui-document-proposal"],
+  "contract_version": "catsco.artifact-manifest.v4",
+  "purpose": "Collaboratively review teaching-report rows: shared findings, feedback, agent-revised comparisons, and a semantic activity journal.",
+  "views": ["review-table", "workboard", "comparison-views", "journal"],
+  "entities": ["lesson-review-row", "work-item", "finding", "finding-feedback", "comparison-view", "agent-note"],
   "entrypoints": ["index.html"],
-  "observation_capabilities": ["runtime_snapshot", "semantic_context"],
+  "observation_capabilities": ["runtime_state", "semantic_context"],
+  "runtime": {
+    "version": "0.2",
+    "surfaces": [
+      { "id": "report", "title": "Review table" },
+      { "id": "workboard", "title": "Work items and findings" },
+      { "id": "journal", "title": "Activity journal" }
+    ],
+    "state": [
+      { "namespace": "shared", "mode": "read-write" },
+      { "namespace": "presence", "mode": "read-write" },
+      { "namespace": "semantic", "mode": "read-write" },
+      { "namespace": "journal", "mode": "read-write" },
+      { "namespace": "result", "mode": "read-write" },
+      { "namespace": "agent", "mode": "read-write" }
+    ]
+  },
   "result_sinks": [
     {
       "id": "lesson-report.agent-notes.upsert.v1",
@@ -14,60 +30,11 @@
         "required": ["summary"],
         "additionalProperties": false,
         "properties": {
-          "summary": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 2000
-          },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
           "row_ids": {
             "type": "array",
             "maxItems": 50,
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 64
-            }
-          },
-          "recommendations": {
-            "type": "array",
-            "maxItems": 20,
-            "items": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 500
-            }
-          }
-        }
-      }
-    },
-    {
-      "id": "lesson-report.ui-document-patch.propose.v1",
-      "description": "Stage a bounded declarative UI-document patch proposal for the current preview; a human applies or discards it.",
-      "input_schema": {
-        "type": "object",
-        "required": ["contract_version", "document_id", "base_revision", "ops"],
-        "additionalProperties": false,
-        "properties": {
-          "contract_version": {
-            "type": "string",
-            "enum": ["artifact-ax.ui-document-patch.v1"]
-          },
-          "document_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
-          },
-          "base_revision": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "ops": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 32,
-            "items": {
-              "type": "object"
-            }
+            "items": { "type": "string", "minLength": 1, "maxLength": 64 }
           }
         }
       }
@@ -75,208 +42,73 @@
   ],
   "task_intents": [
     {
-      "id": "lesson-report.review-selection.v1",
-      "title": "Review selected report context",
-      "description": "Review the selected report rows and return a bounded note for this application.",
+      "id": "lesson-report.collab-review.v1",
+      "title": "Review a shared finding",
+      "description": "Revise exactly one finding in a shared work item and stage one comparison view. Completes by writing a Runtime State result document; a person must explicitly Use or Discard the staged view.",
       "input_schema": {
         "type": "object",
-        "required": [
-          "bundle_id",
-          "session_id",
-          "actor_id",
-          "artifact_id",
-          "revision",
-          "selections",
-          "intent",
-          "assessment"
-        ],
+        "required": ["contract_version", "room", "work_item", "finding"],
         "additionalProperties": false,
         "properties": {
-          "bundle_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "session_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "actor_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
-          "artifact_id": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 64
-          },
-          "revision": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "selections": {
+          "contract_version": { "type": "string", "enum": ["lesson-report.collaboration-task.v2"] },
+          "room": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "work_item": { "type": "object" },
+          "finding": { "type": "object" },
+          "input_preparation": { "type": "object" }
+        }
+      },
+      "completion": { "mode": "runtime_state" }
+    },
+    {
+      "id": "lesson-report.judge-view.v1",
+      "title": "Judge a staged comparison view",
+      "description": "JEV judge: evaluate whether an agent-authored UiDocument staged under a proposal matches intent and context, and write a typed verdict document (allow | flag | abstain). The verdict is supplementary evidence — the human Use/Discard remains the authorization path.",
+      "input_schema": {
+        "type": "object",
+        "required": ["contract_version", "room", "proposal"],
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": { "type": "string", "enum": ["lesson-report.judge-task.v1"] },
+          "room": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "proposal": { "type": "object" }
+        }
+      },
+      "completion": { "mode": "runtime_state" }
+    },
+    {
+      "id": "lesson-report.annotate-ask.v1",
+      "title": "Ask about an annotated element",
+      "description": "A human anchored a note to a rendered element and asked the agent about it. Embedded, the task lands in chat as an artifact reference; standalone, the colleague answers via the agent namespace. The annotation entity is shared room state; the agent answers with a note and journal entry.",
+      "input_schema": {
+        "type": "object",
+        "required": ["contract_version", "room", "annotation"],
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": { "type": "string", "enum": ["lesson-report.annotate-task.v1"] },
+          "room": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "annotation": { "type": "object" }
+        }
+      },
+      "completion": { "mode": "runtime_state" }
+    },
+    {
+      "id": "lesson-report.review-selection.v1",
+      "title": "Review selected rows",
+      "description": "Review the selected report rows and write a bounded Agent note to the declared result sink.",
+      "input_schema": {
+        "type": "object",
+        "required": ["row_ids"],
+        "additionalProperties": false,
+        "properties": {
+          "row_ids": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 50,
-            "items": {
-              "type": "object",
-              "required": ["selection_id", "artifact_id", "revision", "region_id", "label"],
-              "additionalProperties": false,
-              "properties": {
-                "selection_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
-                },
-                "artifact_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
-                },
-                "revision": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "region_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
-                },
-                "node_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 128
-                },
-                "label": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 200
-                },
-                "note": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 300
-                }
-              }
-            }
-          },
-          "intent": {
-            "type": "object",
-            "required": ["text"],
-            "additionalProperties": false,
-            "properties": {
-              "text": {
-                "type": "string",
-                "maxLength": 500
-              }
-            }
-          },
-          "assessment": {
-            "type": "object",
-            "required": ["intent_kind", "confidence", "risk", "complete"],
-            "additionalProperties": false,
-            "properties": {
-              "intent_kind": {
-                "type": "string",
-                "enum": ["collect", "inspect", "explain", "review", "compare", "change", "destructive", "ambiguous"]
-              },
-              "confidence": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1
-              },
-              "risk": {
-                "type": "string",
-                "enum": ["none", "low", "medium", "high"]
-              },
-              "complete": {
-                "type": "boolean"
-              }
-            }
+            "maxItems": 3,
+            "items": { "type": "string", "minLength": 1, "maxLength": 64 }
           }
         }
       },
       "result_sink": "lesson-report.agent-notes.upsert.v1"
-    },
-    {
-      "id": "lesson-report.compose-ui.v1",
-      "title": "Compose a bounded UI-document patch",
-      "description": "Propose a validated declarative UI-document patch from the user's bounded UI intent. The page stages it; a human applies or discards it.",
-      "input_schema": {
-        "type": "object",
-        "required": ["intent", "application", "document"],
-        "additionalProperties": false,
-        "properties": {
-          "intent": {
-            "type": "object",
-            "required": ["text"],
-            "additionalProperties": false,
-            "properties": {
-              "text": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 500
-              }
-            }
-          },
-          "application": {
-            "type": "object",
-            "required": ["artifact_id", "revision"],
-            "additionalProperties": false,
-            "properties": {
-              "artifact_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              },
-              "revision": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "workspace_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "actor_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              }
-            }
-          },
-          "document": {
-            "type": "object",
-            "required": ["contract_version", "id", "revision"],
-            "additionalProperties": false,
-            "properties": {
-              "contract_version": {
-                "type": "string",
-                "enum": ["artifact-ax.ui-document.v1"]
-              },
-              "id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
-              },
-              "revision": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "nodes": {
-                "type": "array",
-                "maxItems": 64,
-                "items": {
-                  "type": "object"
-                }
-              }
-            }
-          }
-        }
-      },
-      "result_sink": "lesson-report.ui-document-patch.propose.v1"
     }
   ]
 }

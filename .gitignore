@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+jev.config.json
 node_modules/
 .pnpm-store/
 dist/
