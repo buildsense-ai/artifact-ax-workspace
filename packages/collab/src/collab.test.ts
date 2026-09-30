@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
 import { createMockSession, devIdentity } from '@artifact-ax/runtime-client';
 import type { RuntimeSession } from '@artifact-ax/runtime-client';
+import { AgentLoop } from './agent-loop.js';
 import { CollabDoc, YJS_UPDATE_FORMAT } from './doc.js';
 import { Journal, journalKey } from './journal.js';
 import { Presence, presenceKey } from './presence.js';
@@ -126,6 +127,55 @@ describe('Presence', () => {
     expect(typeof value.online_at).toBe('string');
     presence.close();
     s.close();
+  });
+});
+
+describe('AgentLoop', () => {
+  it('a conflicting state-put must not strand the result action', async () => {
+    const s = session('bot');
+    // Pre-existing agent doc at revision ≥1 — the colleague's second put
+    // on this key will not advance the revision. If apply() aborted the
+    // pass on a no-op put, the 'result' write that follows would never land
+    // (the exact "task completed, result missing" strand found in deploy).
+    await s.statePut('agent', 'note:w-1', 0, { contract_version: 'x', text: 'old' });
+    const prior = await s.stateGet('agent', 'note:w-1');
+    await s.statePut('agent', 'note:w-1', prior!.revision, { contract_version: 'x', text: 'same' });
+
+    const loop = new AgentLoop({
+      session: s,
+      decider: async () => [
+        { kind: 'state-put', namespace: 'agent', key: 'note:w-1', value: { contract_version: 'x', text: 'same' } },
+        { kind: 'result', taskId: 'task-1', value: { ok: true } },
+      ],
+    });
+    loop.wakeTask({ task_id: 'task-1', intentId: 'test.v1', payload: {} });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const result = await s.stateGet('result', 'result:task-1');
+    expect(result.exists).toBe(true);
+    loop.close();
+  });
+
+  it('a wake enqueued mid-drain is not stranded', async () => {
+    const s = session('bot2');
+    const seen: string[] = [];
+    let loop!: AgentLoop;
+    const decider = async (ctx: import('./agent-loop.js').AgentContext) => {
+      const id = ctx.wake.task?.task_id ?? ctx.wake.event?.key ?? '?';
+      seen.push(id);
+      if (id === 't-1') {
+        // Enqueue a second task from inside the running pass — exercises
+        // the drain tail path.
+        loop.wakeTask({ task_id: 't-2', intentId: 'x', payload: {} });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return [{ kind: 'wait', reason: 'done' }];
+    };
+    loop = new AgentLoop({ session: s, decider });
+    loop.wakeTask({ task_id: 't-1', intentId: 'x', payload: {} });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(seen).toContain('t-1');
+    expect(seen).toContain('t-2');
+    loop.close();
   });
 });
 

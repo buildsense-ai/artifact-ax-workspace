@@ -115,6 +115,9 @@ export class AgentLoop {
       }
     } finally {
       this.draining = false;
+      // Belt-and-suspenders: a wake that somehow slipped past the while
+      // loop's last check is re-drained rather than stranded forever.
+      if (this.queue.length > 0) void this.drain();
     }
   }
 
@@ -191,7 +194,13 @@ export class AgentLoop {
         case 'state-put': {
           const cur = await this.session.stateGet(action.namespace, action.key).catch(() => null);
           const doc = await this.session.statePut(action.namespace, action.key, cur?.revision ?? 0, action.value);
-          return doc.state.revision > (cur?.revision ?? 0);
+          // A no-op put (unchanged revision — CAS conflict or replay) must
+          // NOT abort the pass: intent docs are idempotent side-channels,
+          // and the 'result' write that follows is the actual deliverable.
+          // Aborting here silently stranded task results whenever an agent
+          // doc already existed at a higher revision.
+          void doc;
+          return true;
         }
         case 'result': {
           const key = `${RESULT_NAMESPACE}:${action.taskId}`;
