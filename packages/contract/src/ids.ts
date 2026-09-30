@@ -1,52 +1,57 @@
 /**
- * Stable identifier patterns. The Artifact and Region identifiers are part of
- * the public contract and must survive across published versions.
+ * Identifier patterns shared by the page-side Artifact contracts. The
+ * patterns mirror cats-company/server artifact validators so a value the page
+ * accepts is a value the platform would also accept.
  */
 
-/** Mirrors artifactIDPattern in cats-company/server/cloud_artifacts.go. */
-export const CLOUD_ARTIFACT_ID_PATTERN = /^[a-z0-9]+(?:[a-z0-9._-]*[a-z0-9])?$/;
+/** Cloud Artifact identifiers (mirrors cloud_artifacts.go). */
+export const ARTIFACT_ID_PATTERN = /^[a-z0-9]+(?:[a-z0-9._-]*[a-z0-9])?$/;
 
-/** AX Region identifiers are lower-case kebab-case words. */
-export const REGION_ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+/** Runtime namespace and surface names (mirrors artifactRuntimeNamePattern). */
+export const RUNTIME_NAME_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
+export const RUNTIME_NAME_MAX_LENGTH = 64;
 
-/** AX capability names are lower-case snake_case words. */
-export const CAPABILITY_NAME_PATTERN = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+/** Runtime state document keys (mirrors artifactRuntimeDocumentKeyPattern). */
+export const RUNTIME_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
-export function isCloudArtifactId(value: unknown): value is string {
-  return typeof value === 'string' && CLOUD_ARTIFACT_ID_PATTERN.test(value);
+/** Request ids for runtime/task request envelopes. */
+export const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
+
+/** Task intent and result sink identifiers end in an explicit version. */
+export const RESULT_SINK_ID_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*\.v[1-9]\d*$/;
+
+/** Platform-issued ref shapes. Pages never mint these; they only echo them. */
+export const TASK_ID_PATTERN = /^atk_[A-Za-z0-9_-]{43}$/;
+export const TASK_REF_PATTERN = /^atr_[A-Za-z0-9_-]{43}$/;
+export const RESULT_ID_PATTERN = /^arr_[A-Za-z0-9_-]{43}$/;
+export const RUNTIME_RUN_ID_PATTERN = /^run_[A-Za-z0-9_-]{43}$/;
+export const ARTIFACT_REF_CONTRACT = 'catsco.artifact-ref.v1' as const;
+
+export function isArtifactId(value: unknown): value is string {
+  return typeof value === 'string' && ARTIFACT_ID_PATTERN.test(value);
 }
 
-export function isRegionId(value: unknown): value is string {
-  return typeof value === 'string' && REGION_ID_PATTERN.test(value);
+export function isRuntimeName(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= RUNTIME_NAME_MAX_LENGTH && RUNTIME_NAME_PATTERN.test(value);
 }
 
-export function isCapabilityName(value: unknown): value is string {
-  return typeof value === 'string' && CAPABILITY_NAME_PATTERN.test(value);
+export function isRuntimeKey(value: unknown): value is string {
+  return typeof value === 'string' && RUNTIME_KEY_PATTERN.test(value);
 }
 
-let idCounter = 0;
-
-function nextId(prefix: string): string {
-  idCounter += 1;
-  return `${prefix}_${Date.now().toString(36)}${idCounter.toString(36)}${globalThis.crypto.randomUUID().slice(0, 8)}`;
+export function isRequestId(value: unknown): value is string {
+  return typeof value === 'string' && REQUEST_ID_PATTERN.test(value);
 }
 
-export function newCommandId(): string {
-  return nextId('cmd');
+export function isResultSinkId(value: unknown): value is string {
+  return typeof value === 'string' && RESULT_SINK_ID_PATTERN.test(value);
 }
 
-export function newEventId(): string {
-  return nextId('evt');
-}
+let counter = 0;
 
-export function newApprovalId(): string {
-  return nextId('apr');
-}
-
-export function newDraftId(): string {
-  return nextId('dft');
-}
-
-export function newTaskId(): string {
-  return nextId('task');
+/** Mint a request id for a page-initiated envelope. */
+export function newRequestId(prefix = 'req'): string {
+  counter += 1;
+  const random = globalThis.crypto?.randomUUID?.().replace(/-/g, '').slice(0, 12) ?? 'local';
+  return `${prefix}_${Date.now().toString(36)}${counter.toString(36)}${random}`;
 }

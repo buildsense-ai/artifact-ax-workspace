@@ -1,163 +1,350 @@
-import { AX_CONTRACT_VERSION } from './versions.js';
-import { isRegionId, isCapabilityName } from './ids.js';
+import { isArtifactId, isResultSinkId, isRuntimeName } from './ids.js';
+import { isRecord } from './validate.js';
 
-/** Minimal JSON-Schema-ish property used by region schemas and capability inputs. */
+/**
+ * The versioned application manifest (`artifact-manifest.json`) the platform
+ * resolves for one displayed Artifact version. Version 4 is the first
+ * contract that may declare an Artifact Runtime.
+ *
+ * Mirrors cats-company/server/artifact_task_manifest.go and
+ * artifact_runtime_manifest.go: field names are the upstream JSON names and
+ * every bound below is a bound the platform enforces.
+ */
+
+export const ARTIFACT_MANIFEST_FILENAME = 'artifact-manifest.json' as const;
+export const ARTIFACT_MANIFEST_CONTRACT_V4 = 'catsco.artifact-manifest.v4' as const;
+export const ARTIFACT_MANIFEST_CONTRACT = ARTIFACT_MANIFEST_CONTRACT_V4;
+
+export const ARTIFACT_RUNTIME_VERSION_01 = '0.1' as const;
+export const ARTIFACT_RUNTIME_VERSION_02 = '0.2' as const;
+export const ARTIFACT_RUNTIME_VERSIONS = [ARTIFACT_RUNTIME_VERSION_01, ARTIFACT_RUNTIME_VERSION_02] as const;
+export type ArtifactRuntimeVersion = (typeof ARTIFACT_RUNTIME_VERSIONS)[number];
+
+export const MANIFEST_MAX_SURFACES = 32;
+export const MANIFEST_MAX_STATE_NAMESPACES = 32;
+export const MANIFEST_MAX_TASK_INTENTS = 16;
+export const MANIFEST_MAX_RESULT_SINKS = 16;
+
+/** Minimal JSON-Schema-ish shape used by task inputs and result payloads. */
 export interface SchemaProperty {
-  type: string;
-  title?: string;
+  type?: string;
   description?: string;
-  enum?: unknown[];
-  items?: { type: string };
+  enum?: readonly string[];
+  items?: SchemaProperty;
+  properties?: Record<string, SchemaProperty>;
+  required?: readonly string[];
+  additionalProperties?: boolean;
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+  maxItems?: number;
+  minItems?: number;
 }
 
 export interface Schema {
   type: 'object';
   properties: Record<string, SchemaProperty>;
-  required?: string[];
+  required?: readonly string[];
   additionalProperties?: boolean;
   description?: string;
 }
 
+export interface RuntimeSurfaceDecl {
+  id: string;
+  title?: string;
+}
+
+export interface RuntimeStateDecl {
+  namespace: string;
+  /** The platform currently supports read-write namespaces only. */
+  mode: 'read-write';
+}
+
 /**
- * A Region is a semantic area of the Artifact whose identifier stays stable
- * within the Artifact contract. It is the unit of bounded agent context.
+ * Declared agent colleague — role metadata only (never a permission grant).
+ * Pages attribute task/run activity and render the colleague chip from it;
+ * access control always derives from the task/session, not this field.
  */
-export interface Region {
+export interface AgentParticipant {
+  uid?: string;
+  name: string;
+  kind?: 'agent';
+}
+
+export const MANIFEST_MAX_AGENT_PARTICIPANTS = 4;
+
+export interface ArtifactRuntimeDecl {
+  version: ArtifactRuntimeVersion;
+  surfaces: RuntimeSurfaceDecl[];
+  state: RuntimeStateDecl[];
+  agent_participants?: AgentParticipant[];
+}
+
+/**
+ * A task intent the page may submit. Exactly one completion channel is
+ * declared: `result_sink` delivers a result to the page for human-mediated
+ * application, while `completion: {mode: 'runtime_state'}` lets the Agent
+ * complete by writing a Runtime State document (requires Runtime 0.2).
+ */
+export interface TaskIntentDecl {
   id: string;
   title: string;
-  summary?: string;
-  order: number;
-  schema?: Schema;
-}
-
-/**
- * A Capability is a semantic operation the application exposes. The server
- * validates it against policy, revision, and idempotency; a human or Agent
- * never infers success from changed pixels.
- */
-export interface Capability {
-  name: string;
   description: string;
-  input_schema: Schema;
-  /** Required scopes, e.g. ['artifact:execute']. */
-  requires: ScopeId[];
-  /**
-   * Approval gate. `true` means a human/policy approval is required before
-   * the capability actually executes; an object tunes the message/assignees.
-   */
-  requires_approval?: boolean | { message?: string; assignees?: string[] };
-  /** Optional stable outcome shape description for tooling. */
-  result_schema?: Schema;
+  input_schema?: Schema;
+  result_sink?: string;
+  completion?: { mode: 'runtime_state' };
 }
 
-export type ScopeId = string;
-
-/**
- * The manifest describes what an actor may discover. It does not grant
- * permission; the server filters capabilities again for the authenticated
- * actor.
- */
-export interface Manifest {
-  contract_version: typeof AX_CONTRACT_VERSION;
-  workspace_id: string;
-  artifact_id: string;
-  title: string;
-  published_version: number;
-  published_revision: number;
-  regions: Region[];
-  capabilities: Capability[];
-  policy: { hints: string[] };
-  updated_at: string;
-  /** Relative URL of the per-artifact manifest sidecar (artifact.ax.json). */
-  sidecar?: string;
+export interface ResultSinkDecl {
+  id: string;
+  description?: string;
+  input_schema?: Schema;
 }
 
-export function validateRegion(region: Region, index: number): string[] {
-  const errors: string[] = [];
-  if (!isRegionId(region.id)) {
-    errors.push(`regions[${index}].id must match ${/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/}`.replaceAll('/', ''));
-  }
-  if (typeof region.title !== 'string' || region.title.trim() === '') {
-    errors.push(`regions[${index}].title must be a non-empty string`);
-  }
-  if (typeof region.order !== 'number') {
-    errors.push(`regions[${index}].order must be a number`);
-  }
-  return errors;
+export interface ArtifactManifestV4 {
+  contract_version: typeof ARTIFACT_MANIFEST_CONTRACT_V4;
+  purpose?: string;
+  views: string[];
+  entities: string[];
+  entrypoints: string[];
+  observation_capabilities: string[];
+  result_sinks: ResultSinkDecl[];
+  task_intents: TaskIntentDecl[];
+  runtime?: ArtifactRuntimeDecl;
 }
 
-export function validateCapability(capability: Capability, index: number): string[] {
-  const errors: string[] = [];
-  if (!isCapabilityName(capability.name)) {
-    errors.push(`capabilities[${index}].name must match lower_snake_case`);
+export interface ManifestCheck {
+  ok: boolean;
+  errors: string[];
+  manifest?: ArtifactManifestV4;
+}
+
+function text(value: unknown, max: number): string | null {
+  return typeof value === 'string' && value !== '' && value === value.trim()
+    && value.length <= max && !/[\0\r\n]/.test(value) ? value : null;
+}
+
+function stringList(value: unknown, name: string, max: number, errors: string[]): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > max) {
+    errors.push(`${name} must be an array of at most ${max} strings`);
+    return [];
   }
-  if (typeof capability.description !== 'string' || capability.description.trim() === '') {
-    errors.push(`capabilities[${index}].description must be a non-empty string`);
+  const out: string[] = [];
+  for (const item of value) {
+    const entry = text(item, 128);
+    if (entry === null) {
+      errors.push(`${name} entries must be bounded strings`);
+      return out;
+    }
+    out.push(entry);
   }
-  if (
-    capability.input_schema === undefined ||
-    capability.input_schema.type !== 'object' ||
-    typeof capability.input_schema.properties !== 'object'
-  ) {
-    errors.push(`capabilities[${index}].input_schema must be an object schema`);
-  }
-  if (!Array.isArray(capability.requires) || capability.requires.some((s) => typeof s !== 'string')) {
-    errors.push(`capabilities[${index}].requires must be an array of scope strings`);
-  }
-  if (
-    capability.requires_approval !== undefined &&
-    typeof capability.requires_approval !== 'boolean' &&
-    typeof capability.requires_approval !== 'object'
-  ) {
-    errors.push(`capabilities[${index}].requires_approval must be boolean or an object`);
-  }
-  return errors;
+  return out;
 }
 
 /**
- * Structural validation of a manifest without access to workspace policy.
- * Used before publish and by the `describe` surface. Returns accumulated
- * errors; an empty array means valid.
+ * Validate a parsed manifest body against the v4 contract. Structural
+ * validation only: the page does not decide whether the platform accepts the
+ * manifest, it just refuses to ship a malformed one.
  */
-export function validateManifest(manifest: Manifest): string[] {
+export function validateManifestV4(value: unknown): ManifestCheck {
   const errors: string[] = [];
-  if (manifest.contract_version !== AX_CONTRACT_VERSION) {
-    errors.push(`contract_version must be ${AX_CONTRACT_VERSION}`);
+  if (!isRecord(value)) {
+    return { ok: false, errors: ['manifest must be an object'] };
   }
-  if (typeof manifest.workspace_id !== 'string' || manifest.workspace_id === '') {
-    errors.push('workspace_id must be a non-empty string');
+  if (value.contract_version !== ARTIFACT_MANIFEST_CONTRACT_V4) {
+    errors.push(`contract_version must be ${ARTIFACT_MANIFEST_CONTRACT_V4}`);
   }
-  if (!isCloudArtifactLikeId(manifest.artifact_id)) {
-    errors.push('artifact_id must match [a-z0-9._-] pattern');
+  const purpose = value.purpose === undefined ? undefined : text(value.purpose, 500);
+  if (value.purpose !== undefined && purpose === undefined) {
+    errors.push('purpose must be a bounded string');
   }
-  if (typeof manifest.title !== 'string' || manifest.title.trim() === '') {
-    errors.push('title must be a non-empty string');
-  }
-  if (!Number.isInteger(manifest.published_version) || manifest.published_version < 1) {
-    errors.push('published_version must be a positive integer');
-  }
-  if (!Number.isInteger(manifest.published_revision) || manifest.published_revision < 0) {
-    errors.push('published_revision must be a non-negative integer');
-  }
-  const regionIds = new Set<string>();
-  manifest.regions.forEach((region, i) => {
-    errors.push(...validateRegion(region, i));
-    if (regionIds.has(region.id)) {
-      errors.push(`duplicate region id ${region.id}`);
+  const views = stringList(value.views, 'views', 32, errors);
+  const entities = stringList(value.entities, 'entities', 64, errors);
+  const entrypoints = stringList(value.entrypoints, 'entrypoints', 16, errors);
+  const observationCapabilities = stringList(value.observation_capabilities, 'observation_capabilities', 16, errors);
+
+  const sinkIds = new Set<string>();
+  const resultSinks: ResultSinkDecl[] = [];
+  if (value.result_sinks !== undefined) {
+    if (!Array.isArray(value.result_sinks) || value.result_sinks.length > MANIFEST_MAX_RESULT_SINKS) {
+      errors.push(`result_sinks must be an array of at most ${MANIFEST_MAX_RESULT_SINKS} items`);
+    } else {
+      for (const [index, raw] of value.result_sinks.entries()) {
+        if (!isRecord(raw)) {
+          errors.push(`result_sinks[${index}] must be an object`);
+          continue;
+        }
+        const id = text(raw.id, 128);
+        if (id === null || !isResultSinkId(id) || sinkIds.has(id)) {
+          errors.push(`result_sinks[${index}].id is invalid or duplicated`);
+          continue;
+        }
+        sinkIds.add(id);
+        const description = raw.description === undefined ? undefined : text(raw.description, 500);
+        resultSinks.push({ id, ...(description ? { description } : {}), ...(isRecord(raw.input_schema) ? { input_schema: raw.input_schema as unknown as Schema } : {}) });
+      }
     }
-    regionIds.add(region.id);
-  });
-  const capabilityNames = new Set<string>();
-  manifest.capabilities.forEach((capability, i) => {
-    errors.push(...validateCapability(capability, i));
-    if (capabilityNames.has(capability.name)) {
-      errors.push(`duplicate capability name ${capability.name}`);
+  }
+
+  const taskIntents: TaskIntentDecl[] = [];
+  const intentIds = new Set<string>();
+  if (value.task_intents !== undefined) {
+    if (!Array.isArray(value.task_intents) || value.task_intents.length > MANIFEST_MAX_TASK_INTENTS) {
+      errors.push(`task_intents must be an array of at most ${MANIFEST_MAX_TASK_INTENTS} items`);
+    } else {
+      for (const [index, raw] of value.task_intents.entries()) {
+        if (!isRecord(raw)) {
+          errors.push(`task_intents[${index}] must be an object`);
+          continue;
+        }
+        const id = text(raw.id, 128);
+        const title = text(raw.title, 256);
+        const description = text(raw.description, 500);
+        if (id === null || !isResultSinkId(id) || intentIds.has(id) || title === null || description === null) {
+          errors.push(`task_intents[${index}] is invalid`);
+          continue;
+        }
+        const resultSinkRaw = raw.result_sink === undefined ? undefined : text(raw.result_sink, 128);
+        if (raw.result_sink !== undefined && resultSinkRaw === null) {
+          errors.push(`task_intents[${index}].result_sink is invalid`);
+          continue;
+        }
+        const resultSink = resultSinkRaw ?? undefined;
+        const hasCompletion = isRecord(raw.completion);
+        if ((resultSink === undefined) === !hasCompletion) {
+          errors.push(`task_intents[${index}] must declare exactly one of result_sink or completion`);
+          continue;
+        }
+        if (resultSink !== undefined && !sinkIds.has(resultSink)) {
+          errors.push(`task_intents[${index}].result_sink is not a declared sink`);
+          continue;
+        }
+        let completion: TaskIntentDecl['completion'];
+        if (hasCompletion) {
+          const mode = (raw.completion as Record<string, unknown>).mode;
+          if (mode !== 'runtime_state' || Object.keys(raw.completion as object).length !== 1) {
+            errors.push(`task_intents[${index}].completion must be {"mode":"runtime_state"}`);
+            continue;
+          }
+          completion = { mode: 'runtime_state' };
+        }
+        intentIds.add(id);
+        taskIntents.push({
+          id, title, description,
+          ...(isRecord(raw.input_schema) ? { input_schema: raw.input_schema as unknown as Schema } : {}),
+          ...(resultSink !== undefined ? { result_sink: resultSink } : {}),
+          ...(completion ? { completion } : {}),
+        });
+      }
     }
-    capabilityNames.add(capability.name);
-  });
-  return errors;
+  }
+
+  let runtime: ArtifactRuntimeDecl | undefined;
+  if (value.runtime !== undefined) {
+    if (!isRecord(value.runtime)) {
+      errors.push('runtime must be an object');
+    } else {
+      const version = text(value.runtime.version, 16) as ArtifactRuntimeVersion | null;
+      if (version === null || !ARTIFACT_RUNTIME_VERSIONS.includes(version)) {
+        errors.push('runtime.version must be "0.1" or "0.2"');
+      }
+      const surfaces: RuntimeSurfaceDecl[] = [];
+      if (!Array.isArray(value.runtime.surfaces) || value.runtime.surfaces.length === 0
+        || value.runtime.surfaces.length > MANIFEST_MAX_SURFACES) {
+        errors.push(`runtime.surfaces must contain 1-${MANIFEST_MAX_SURFACES} items`);
+      } else {
+        const seen = new Set<string>();
+        for (const [index, raw] of value.runtime.surfaces.entries()) {
+          if (!isRecord(raw) || !isRuntimeName(raw.id) || seen.has(raw.id as string)) {
+            errors.push(`runtime.surfaces[${index}].id is invalid or duplicated`);
+            continue;
+          }
+          seen.add(raw.id as string);
+          const title2 = raw.title === undefined ? undefined : text(raw.title, 128);
+          surfaces.push({ id: raw.id as string, ...(title2 ? { title: title2 } : {}) });
+        }
+      }
+      const states: RuntimeStateDecl[] = [];
+      if (!Array.isArray(value.runtime.state) || value.runtime.state.length === 0
+        || value.runtime.state.length > MANIFEST_MAX_STATE_NAMESPACES) {
+        errors.push(`runtime.state must contain 1-${MANIFEST_MAX_STATE_NAMESPACES} items`);
+      } else {
+        const seen = new Set<string>();
+        for (const [index, raw] of value.runtime.state.entries()) {
+          if (!isRecord(raw) || !isRuntimeName(raw.namespace) || seen.has(raw.namespace as string)
+            || raw.mode !== 'read-write') {
+            errors.push(`runtime.state[${index}] is invalid or duplicated`);
+            continue;
+          }
+          seen.add(raw.namespace as string);
+          states.push({ namespace: raw.namespace as string, mode: 'read-write' });
+        }
+      }
+      let agentParticipants: AgentParticipant[] | undefined;
+      if (value.runtime.agent_participants !== undefined) {
+        if (!Array.isArray(value.runtime.agent_participants)
+          || value.runtime.agent_participants.length === 0
+          || value.runtime.agent_participants.length > MANIFEST_MAX_AGENT_PARTICIPANTS) {
+          errors.push(`runtime.agent_participants must contain 1-${MANIFEST_MAX_AGENT_PARTICIPANTS} items`);
+        } else {
+          const seen = new Set<string>();
+          agentParticipants = [];
+          for (const [index, raw] of value.runtime.agent_participants.entries()) {
+            const name = isRecord(raw) ? text(raw.name, 64) : null;
+            const uid = isRecord(raw) && raw.uid !== undefined ? text(raw.uid, 64) : undefined;
+            const kind = isRecord(raw) && raw.kind !== undefined ? text(raw.kind, 32) : undefined;
+            if (name === null || (kind !== undefined && kind !== 'agent')
+              || (raw as Record<string, unknown>).uid !== undefined && uid === undefined) {
+              errors.push(`runtime.agent_participants[${index}] is invalid`);
+              continue;
+            }
+            const dedupe = `${uid ?? ''}|${name}`;
+            if (seen.has(dedupe)) {
+              errors.push(`runtime.agent_participants[${index}] is duplicated`);
+              continue;
+            }
+            seen.add(dedupe);
+            agentParticipants.push({ name, ...(uid ? { uid } : {}), kind: 'agent' });
+          }
+        }
+      }
+      if (version && surfaces.length > 0 && states.length > 0) {
+        runtime = {
+          version,
+          surfaces,
+          state: states,
+          ...(agentParticipants && agentParticipants.length > 0 ? { agent_participants: agentParticipants } : {}),
+        };
+      }
+    }
+  }
+  if (taskIntents.some((intent) => intent.completion) && runtime?.version !== ARTIFACT_RUNTIME_VERSION_02) {
+    errors.push('runtime_state task completion requires runtime.version "0.2"');
+  }
+
+  const manifest: ArtifactManifestV4 = {
+    contract_version: ARTIFACT_MANIFEST_CONTRACT_V4,
+    ...(purpose ? { purpose } : {}),
+    views, entities, entrypoints,
+    observation_capabilities: observationCapabilities,
+    result_sinks: resultSinks,
+    task_intents: taskIntents,
+    ...(runtime ? { runtime } : {}),
+  };
+  return { ok: errors.length === 0, errors, manifest: errors.length === 0 ? manifest : undefined };
 }
 
-function isCloudArtifactLikeId(value: unknown): boolean {
-  return typeof value === 'string' && /^[a-z0-9]+(?:[a-z0-9._-]*[a-z0-9])?$/.test(value);
+/** Convenience: namespaces the manifest allows for a write. */
+export function manifestAllowsNamespace(manifest: ArtifactManifestV4, namespace: string, write: boolean): boolean {
+  if (!manifest.runtime) return false;
+  for (const declaration of manifest.runtime.state) {
+    if (declaration.namespace === namespace) {
+      return !write || declaration.mode === 'read-write';
+    }
+  }
+  return false;
 }
+
+export { isArtifactId };

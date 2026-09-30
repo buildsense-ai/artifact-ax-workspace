@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Example structured Artifact: a teaching report with a review table, summary panel, approval panel, and an approval-gated capability used by the demo SPA and the artifact node.",
+  "description": "Teaching-report domain vocabulary (review rows, statuses, seed data) shared by the collaborative demo artifact.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -16,8 +16,5 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src"
   },
-  "dependencies": {
-    "@artifact-ax/contract": "workspace:*",
-    "@artifact-ax/domain": "workspace:*"
-  }
+  "dependencies": {}
 }

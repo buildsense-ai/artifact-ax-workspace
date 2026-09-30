@@ -1,9 +1,9 @@
 {
-  "name": "@artifact-ax/contract",
+  "name": "@artifact-ax/jev",
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Page-side CatsCo Artifact contracts: manifest v4, frame-bridge, runtime state/events, context/result/task envelopes, and bounded validators.",
+  "description": "Minimal TypeSafe System One (JEV) client — agent-side only. Sends bounded redacted evidence to /v1/systemone and decodes typed noul/choice answers with abstention semantics; holds no authorization or persistence authority.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -15,5 +15,6 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src"
-  }
+  },
+  "dependencies": {}
 }

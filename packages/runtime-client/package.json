@@ -1,0 +1,22 @@
+{
+  "name": "@artifact-ax/runtime-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Page-side Artifact Runtime client: frame-bridge handshake, runtime state/events ops, task submission, context/result serving, launch identity, and a BroadcastChannel mock host for local development.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@artifact-ax/contract": "workspace:*"
+  }
+}
