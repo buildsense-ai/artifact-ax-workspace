@@ -4,13 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Lesson report · collaborative artifact</title>
-    <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <!-- The app renders directly into #app from the merged shared document.
-         data-artifact-id / data-workspace-id are stable anchors; region and
-         node ids on rows/items stay the same across versions. -->
+    <!-- React mounts into #app. data-artifact-id / data-workspace-id are
+         stable anchors; region and node ids on rows/items stay the same
+         across versions. -->
     <main id="app" data-artifact-id="lesson-report" data-workspace-id="ws_demo"></main>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

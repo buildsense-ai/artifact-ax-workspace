@@ -41,7 +41,11 @@ import { prepareInputContext } from './domain.js';
 import type { JudgeViewTaskInput } from './contracts.js';
 import { buildPageContext, buildRuntimeView } from './projection.js';
 import { colleagueDecider, type ViewComposer, type ViewJudge } from './colleague.js';
-import { renderApp, type AppHandlers, type AppView } from './view.js';
+import { createElement } from 'react';
+import { flushSync } from 'react-dom';
+import { createRoot, type Root } from 'react-dom/client';
+import { App, type AppHandlers, type AppView } from './app.js';
+import './index.css';
 
 /**
  * Bootstrap: resolve identity → open a session (real host or BroadcastChannel
@@ -161,6 +165,7 @@ async function sidecarCompose(input: Parameters<ViewComposer>[0]): ReturnType<Vi
 async function start(): Promise<void> {
   const root = document.getElementById('app');
   if (!root) return;
+  const reactRoot: Root = createRoot(root);
 
   const { identity: resolved, via } = await resolveIdentity(location.search);
   // A standalone visitor who isn't even a launch guest gets a stable local
@@ -264,7 +269,9 @@ async function start(): Promise<void> {
         notice: ui.notice,
         annotateMode: ui.annotateMode,
       };
-      renderApp(root, view, handlers);
+      flushSync(() => {
+        reactRoot.render(createElement(App, { view, handlers }));
+      });
       // Mark annotated anchors so the canvas shows where notes hang.
       // Element annotations outline their node; region annotations draw a
       // dashed rect reprojected onto the enclosing node's CURRENT bounds

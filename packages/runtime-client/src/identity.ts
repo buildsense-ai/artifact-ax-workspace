@@ -72,14 +72,44 @@ export function devIdentity(name: string): CollabIdentity {
 }
 
 /**
- * Resolve the visitor identity from the launch URL. Order: explicit guest →
- * launch code exchange → dev `?as=` → null (caller picks the standalone
- * guest).
+ * The catsco.artifact-viewer.v1 contract an app's backend exposes at
+ * `api/whoami`: it forwards the visitor's `catsco_artifact_id` domain cookie
+ * to the artifact gateway's viewer lookup — the page itself can never read
+ * that HttpOnly cookie, and must not try. Used by standalone deployments.
+ */
+export interface WhoamiResponse {
+  authenticated?: boolean;
+  viewer?: { uid?: number | string; username?: string } | null;
+}
+
+export interface WhoamiFetcher {
+  (url: string): Promise<{ authenticated?: boolean; viewer?: unknown } | null>;
+}
+
+const defaultWhoami: WhoamiFetcher = (url) =>
+  fetch(url, { cache: 'no-store', credentials: 'same-origin' })
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
+
+/** Resolve identity from a deployed app's whoami endpoint (cookie forwarded server-side). */
+async function whoamiIdentity(fetcher: WhoamiFetcher): Promise<CollabIdentity | null> {
+  const body = await fetcher('api/whoami');
+  if (!body || body.authenticated !== true) return null;
+  const viewer = body.viewer as { uid?: unknown; username?: unknown } | null | undefined;
+  const uid = String(viewer?.uid ?? '').trim();
+  if (!uid) return null;
+  return { uid, username: String(viewer?.username ?? uid), authenticated: true };
+}
+
+/**
+ * Resolve the visitor identity. Order: explicit guest → launch code exchange
+ * → dev `?as=` → same-origin `api/whoami` (deployed standalone apps) → guest.
  */
 export async function resolveIdentity(
   search: string,
   fetcher?: IdentityFetcher,
-): Promise<{ identity: CollabIdentity; via: 'code' | 'guest' | 'dev' | 'standalone' }> {
+  whoami: WhoamiFetcher = defaultWhoami,
+): Promise<{ identity: CollabIdentity; via: 'code' | 'guest' | 'dev' | 'whoami' | 'standalone' }> {
   const params = parseLaunchParams(search);
   if (params.identityMode === 'guest') {
     return { identity: GUEST_IDENTITY, via: 'guest' };
@@ -91,5 +121,7 @@ export async function resolveIdentity(
   if (params.as) {
     return { identity: devIdentity(params.as), via: 'dev' };
   }
+  const deployed = await whoamiIdentity(whoami);
+  if (deployed) return { identity: deployed, via: 'whoami' };
   return { identity: GUEST_IDENTITY, via: 'standalone' };
 }
