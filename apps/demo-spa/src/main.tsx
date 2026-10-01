@@ -7,6 +7,7 @@ import {
 import {
   createMockSession,
   devIdentity,
+  openHttpSession,
   openRuntimeSession,
   resolveIdentity,
   type RuntimeSession,
@@ -60,10 +61,11 @@ const RESULT_NAMESPACE = 'result';
 
 const params = new URLSearchParams(location.search);
 const roomKey = (params.get('room') ?? 'default').slice(0, 48);
-// Mock when asked, or when the page runs standalone (no embedding host):
-// a lone page can never reach a real runtime anyway.
+// Session selection: embedded → frame-bridge; standalone → the app's own
+// backend bridge (api/runtime/*, forwarded to the artifact gateway);
+// `?mock=1` or an unreachable bridge → local BroadcastChannel mock.
 const embedded = window.parent !== window;
-const useMock = params.get('mock') === '1' || !embedded;
+const forceMock = params.get('mock') === '1';
 /** `?agent=1` scripted colleague · `?agent=jev` adds the real sidecar judge. */
 const agentParam = params.get('agent') === '1' || params.get('agent') === 'jev'
   ? params.get('agent')!
@@ -172,23 +174,29 @@ async function start(): Promise<void> {
   // dev identity so editing still works in the dev loop.
   const identity = via === 'guest' && !embedded ? devIdentity('local') : resolved;
 
-  const session: RuntimeSession = useMock
-    ? createMockSession({
-        identity,
-        room: roomKey,
-        artifactId: ARTIFACT_ID,
-        agent: agentParam !== undefined
-          ? (task, taskInput, agentSession) => void colleague(agentSession).wakeTask({
-              task_id: task.task_id,
-              intentId: taskInput.intentId,
-              payload: taskInput.payload,
-            })
-          : undefined,
-        agentEvents: agentParam !== undefined
-          ? (event, agentSession) => colleague(agentSession).wakeEvent(event)
-          : undefined,
-      })
-    : await openRuntimeSession({ identity, awaitHostConnect: true });
+  // The scripted in-page colleague only exists in mock mode — on a real
+  // session, agent writes must be stamped by the bot's own uid (structural
+  // attribution), so the colleague runs server-side, not in a viewer's page.
+  const mockSession = () => createMockSession({
+    identity,
+    room: roomKey,
+    artifactId: ARTIFACT_ID,
+    agent: agentParam !== undefined
+      ? (task, taskInput, agentSession) => void colleague(agentSession).wakeTask({
+          task_id: task.task_id,
+          intentId: taskInput.intentId,
+          payload: taskInput.payload,
+        })
+      : undefined,
+    agentEvents: agentParam !== undefined
+      ? (event, agentSession) => colleague(agentSession).wakeEvent(event)
+      : undefined,
+  });
+  const session: RuntimeSession = forceMock
+    ? mockSession()
+    : embedded
+      ? await openRuntimeSession({ identity, awaitHostConnect: true })
+      : (await openHttpSession({ identity })) ?? mockSession();
 
   const ui: UiState = {
     selectedRowIds: new Set(),

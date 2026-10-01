@@ -75,6 +75,32 @@ on the one a request arrived on.
 - The `catsco_artifact_id` domain cookie is **gateway-side only** (HttpOnly,
   exchanged by the gateway with the shared token); the page never sees it.
 - Dev: `?as=<name>` mints a deterministic dev identity.
+- Standalone deploys (direct URL, no launch code): the app's own backend
+  exposes `GET api/whoami`, forwarding the domain cookie to the gateway's
+  viewer lookup → `catsco.artifact-viewer.v1` `{authenticated, viewer}`.
+  `resolveIdentity` tries it before falling back to guest.
+
+## Standalone runtime bridge
+
+A standalone page has no frame-bridge host — but it can still reach real
+Runtime State through the app's backend, which holds the app-scoped gateway
+credential. Same-origin endpoints (`HttpRuntimeSession` in runtime-client):
+
+| Endpoint | Body | Returns |
+|---|---|---|
+| `POST api/runtime/connect` | — | `{artifact, runtime, event_cursor, runs?}` |
+| `POST api/runtime/state.get` | `{namespace, key}` | `{state}` |
+| `POST api/runtime/state.list` | — | `{state_refs, truncated}` |
+| `POST api/runtime/state.put` | `{namespace, key, base_revision, value}` | `{state, event?}` |
+| `POST api/runtime/state.patch` | `{namespace, key, base_revision, patch}` | `{state, event?}` |
+| `GET api/runtime/events?after=<cursor>` | — | `{events, cursor}` — long-poll; pseudo-events `{type:'task.status', task:{...}}` / `{type:'task.rejected', rejected:{...}}` ride the same stream |
+| `POST api/runtime/task.submit` | `{intent_id, payload}` | `{task}` or `4xx {code,message}` |
+| `GET api/whoami` | — | `catsco.artifact-viewer.v1` |
+
+Missing bridge → the page falls back to the BroadcastChannel mock
+(`?mock=1` forces it). The in-page scripted colleague is mock-only: on a
+real session, agent writes must be stamped by the bot's own uid, so the
+server-side colleague runs against the backend bridge instead.
 
 ## Manifest v4
 

@@ -22,6 +22,13 @@ why it matters, how to verify/fix. Status date: 2026-09-30.
 | P1-4 | **Cross-actor journal order is timestamp-approximate** | "What happened" is legible; causal ordering is not provable | Correlate entries with commit-ordered `event_id` stream when strict order is needed (recorded in `05`) |
 | P1-5 | **Transient dual-leader on joins** | `isLeader()` can be true on two sides during presence churn → duplicate judge submissions / materializations | All leader actions are idempotent-by-key today; add leader epoch/fencing if duplication becomes visible |
 
+## P1 — deployment reality
+
+| # | Defect | Why it matters | Verify / fix |
+|---|--------|----------------|--------------|
+| P1-1 | **Standalone direct-URL deploy was silently running the mock session** | `embedded = window.parent !== window` → direct URL → BroadcastChannel mock: all "shared" state stayed inside one browser context. Every e2e pass (presence, notes, annotate→patch) was two playwright pages in ONE context talking over BroadcastChannel — nothing ever reached the gateway. A user's annotations were invisible to everyone else | Fixed: `openHttpSession` standalone transport (`api/runtime/*`, backend forwards to gateway); falls back to mock only when no bridge answers. Deploy check: `curl <app>/api/runtime/connect` must return JSON, not 404 |
+| P1-2 | **Verification ≠ verification** — e2e on a standalone URL only ever exercises the mock | Any "room verification" that doesn't cross process/browser boundaries proves nothing about the runtime | Real verification must run from two separate browsers/machines, or via `api/runtime/state.list` inspection server-side |
+
 ## P1.5 — porting hazards (learned from the online-todo deploy)
 
 | # | Defect | Why it matters | Verify / fix |
